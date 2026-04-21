@@ -1,0 +1,12 @@
+[project]
+name = "deepseek-browser-cli"
+version = "0.1.0"
+description = "CLI wrapper for agent-browser"
+requires-python = ">=3.11"
+
+[project.scripts]
+deepseek-browser = "deepseek_browser_cli.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
