@@ -42,8 +42,9 @@ uv pip install -e .
 ## CLI Usage
 
 ```bash
-# Interactive multi-round chat
+# Interactive multi-round chat (streaming, unlimited turns)
 deepseek-browser --interactive
+deepseek-browser -i --mode expert --thinking
 
 # One-shot command through agent-browser
 deepseek-browser snapshot
