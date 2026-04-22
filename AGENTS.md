@@ -17,19 +17,19 @@ This file is the implementation playbook for AI coding agents.
 4. New public APIs belong in their semantic module (`primitives`, `semantics`, `chat`). Re-export through `deepseek_model.py` if external callers need it.
 5. Layer 2 actions rely on multiple fallback strategies (a11y tree → JS → broader search). Maintain this pattern for resilience against UI changes.
 
-## Architecture
+## Where Code Lives
 
-Three-layer design. Read the relevant source file for specifics.
+See README for architecture overview. When editing, put new code in the right layer:
 
-- **Layer 1 (`primitives`)** — `A11yPrimitives`: generic CDP bridge via `agent-browser`. Caching and invalidation live here.
-- **Layer 2 (`semantics`)** — `DeepSeekSemantics`: DeepSeek-specific actions. Every action has fallback paths (a11y first, JS second, broader search last).
-- **Layer 3 (`chat`)** — `DeepSeekChat`, `MultiRoundChat`: high-level workflows. Polling loops use fast state checks, not full snapshots.
-
-Other modules:
-- `agent_bridge.py` — Observer/Actor/Bridge pattern for autonomous agents.
-- `mcp_server.py` — FastMCP stdio server with async polling.
-- `models.py` — All dataclasses.
-- `deepseek_model.py` — Backward-compat shim; do not add logic here.
+| Layer | File | What goes here |
+|-------|------|---------------|
+| L1 | `primitives.py` | CDP bridge, caching, generic a11y ops |
+| L2 | `semantics.py` | DeepSeek-specific actions, fallback strategies |
+| L3 | `chat.py` | Conversation workflows, polling loops |
+| — | `models.py` | Dataclasses |
+| — | `agent_bridge.py` | JSON observe/act for AI agents |
+| — | `mcp_server.py` | MCP tools |
+| — | `deepseek_model.py` | Backward-compat shim only |
 
 ## Design Principles
 
