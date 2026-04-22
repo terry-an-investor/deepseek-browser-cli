@@ -108,7 +108,7 @@ Add to `~/.claude/CLAUDE.md`:
     "deepseek": {
       "command": "uv",
       "args": ["run", "python", "-m", "deepseek_browser_cli.mcp_server"],
-      "cwd": "/path/to/deepseek-browser-cli"
+      "cwd": "/path/to/deepseek-web-cli"
     }
   }
 }

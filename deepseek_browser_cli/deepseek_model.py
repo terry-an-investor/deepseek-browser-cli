@@ -210,6 +210,14 @@ class DeepSeekSemantics:
         "内容由 AI 生成", "昨天", "今天", "7 天内", "30 天内",
         "⌘ J", "快速模式", "专家模式",
     ])
+    ACTIVE_A11Y_TOKENS = (
+        "pressed",
+        "selected",
+        "checked",
+        "active",
+        "aria-pressed=true",
+        "aria-checked=true",
+    )
 
     THINKING_INDICATOR = "已思考"
     THINKING_TIME_PATTERN = re.compile(r"用时\s*([^）]+)")
@@ -232,13 +240,14 @@ class DeepSeekSemantics:
                 has_input: false,
                 is_streaming: false,
                 deep_thinking: false,
-                web_search: false
+                web_search: false,
+                mode: 'unknown'
             };
 
-            // Initial page: has a radiogroup with 2+ radios AND textarea AND no messages
-            const radios = document.querySelectorAll('[role="radiogroup"] radio, [role="radio"]');
+            const radios = Array.from(document.querySelectorAll('[role="radio"], input[type="radio"]'));
             const textarea = document.querySelector('textarea');
             const messages = document.querySelectorAll('.ds-message');
+            // Initial page: has mode radios, an input, and no rendered chat messages yet.
             if (radios.length >= 2 && textarea && messages.length === 0) {
                 info.is_initial_page = true;
             }
@@ -246,10 +255,13 @@ class DeepSeekSemantics:
             // Has input field
             info.has_input = !!textarea;
 
-            // Streaming: look for loading spinner or generating indicator
-            const spinner = document.querySelector('.ds-loading, [class*="loading"], [class*="spinner"]');
-            const streamingText = document.querySelector('[class*="streaming"], [class*="generating"]');
-            info.is_streaming = !!(spinner || streamingText);
+            // Streaming: look for busy regions, loading indicators, or visible generation text.
+            const bodyText = document.body ? (document.body.innerText || '') : '';
+            const spinner = document.querySelector(
+                '.ds-loading, [class*="loading"], [class*="spinner"], [aria-busy="true"]'
+            );
+            const streamingText = /正在思考|generating|thinking/i.test(bodyText);
+            info.is_streaming = !!spinner || streamingText;
 
             // Toggle states via CSS class (language-agnostic)
             const allBtns = document.querySelectorAll('button, [role="button"]');
@@ -272,8 +284,8 @@ class DeepSeekSemantics:
 
             // Mode detection (language-agnostic)
             // Strategy 1: On initial page, check which radio is selected
-            const radios = document.querySelectorAll('[role="radio"], input[type="radio"]');
-            for (const radio of radios) {
+            const modeRadios = document.querySelectorAll('[role="radio"], input[type="radio"]');
+            for (const radio of modeRadios) {
                 const isChecked = radio.getAttribute('aria-checked') === 'true' || radio.checked;
                 const label = (radio.textContent || radio.getAttribute('aria-label') || '').trim();
                 if (isChecked) {
@@ -288,7 +300,7 @@ class DeepSeekSemantics:
                 }
             }
             // Strategy 2: On conversation page, look for heading "Start chatting with X"
-            if (!info.mode) {
+            if (info.mode === 'unknown') {
                 const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6, div, span');
                 for (const h of headings) {
                     const txt = h.textContent.trim();
@@ -301,7 +313,7 @@ class DeepSeekSemantics:
                 }
             }
             // Strategy 3: Look for mode label on conversation page response headers
-            if (!info.mode) {
+            if (info.mode === 'unknown') {
                 const modeLabels = document.querySelectorAll('[class*="mode"], [class*="model"]');
                 for (const label of modeLabels) {
                     const txt = label.textContent.trim();
@@ -319,26 +331,40 @@ class DeepSeekSemantics:
             return JSON.stringify(info);
         })()
         """
-        dom_info = {"is_initial_page": False, "has_input": False, "is_streaming": False,
-                    "deep_thinking": False, "web_search": False}
+        dom_info = {
+            "is_initial_page": False,
+            "has_input": False,
+            "is_streaming": False,
+            "deep_thinking": False,
+            "web_search": False,
+            "mode": "unknown",
+        }
         result, code = self.a11y.eval_js(js)
         if code == 0 and result:
             try:
                 import ast, json
                 clean = ast.literal_eval(result.strip())
                 dom_info = json.loads(clean)
-            except (ValueError, json.JSONDecodeError):
+            except (ValueError, SyntaxError, json.JSONDecodeError):
                 pass
 
+        has_input = dom_info.get("has_input", False) or ("textarea" in snap or "textbox" in snap)
         # Fallback to a11y text heuristics if JS fails
         is_initial = dom_info.get("is_initial_page", False)
         if not is_initial:
-            is_initial = "radiogroup" in snap and ('radio "快速模式"' in snap or 'radio "Instant"' in snap)
-
-        has_input = dom_info.get("has_input", False) or ("textarea" in snap or "textbox" in snap)
+            has_mode_selector = any(
+                label in snap
+                for label in ('radio "快速模式"', 'radio "Instant"', 'radio "专家模式"', 'radio "Expert"')
+            )
+            is_initial = has_input and len(msgs) == 0 and has_mode_selector
         is_streaming = dom_info.get("is_streaming", False) or ("正在思考" in snap or "generating" in snap.lower())
-        deep_thinking = dom_info.get("deep_thinking", False) or ('button "深度思考"' in snap or 'button "DeepThink"' in snap)
-        web_search = dom_info.get("web_search", False) or ('button "智能搜索"' in snap or 'button "Search"' in snap)
+        deep_thinking = dom_info.get("deep_thinking", False)
+        if not deep_thinking:
+            deep_thinking = self._infer_toggle_state_from_snapshot(snap, ("深度思考", "DeepThink"))
+
+        web_search = dom_info.get("web_search", False)
+        if not web_search:
+            web_search = self._infer_toggle_state_from_snapshot(snap, ("智能搜索", "Search"))
 
         # Detect mode: trust JS detection first, then query selected radio
         mode = dom_info.get("mode", "unknown")
@@ -375,6 +401,15 @@ class DeepSeekSemantics:
             deep_thinking_enabled=deep_thinking,
             web_search_enabled=web_search,
         )
+
+    def _infer_toggle_state_from_snapshot(self, snapshot: str, labels: tuple[str, ...]) -> bool:
+        """Infer whether a toggle is active from a11y snapshot metadata."""
+        label_patterns = tuple(f'button "{label}"' for label in labels)
+        for line in snapshot.split("\n"):
+            if any(pattern in line for pattern in label_patterns):
+                lowered = line.lower()
+                return any(token in lowered for token in self.ACTIVE_A11Y_TOKENS)
+        return False
 
     # --- Session / Sidebar management ---
 
@@ -600,53 +635,10 @@ class DeepSeekSemantics:
         return code == 0 and "not found" not in result
 
     def upload_file(self, filepath: str) -> bool:
-        """Upload a file by triggering the file input.
-
-        Uses JS to trigger the hidden file input element.
-        """
+        """Return False until file upload is implemented with real CDP support."""
         if not os.path.exists(filepath):
             return False
-        abs_path = os.path.abspath(filepath)
-        js = f"""
-        (function() {{
-            // Find file input (may be hidden)
-            let input = document.querySelector('input[type="file"]');
-            if (!input) {{
-                // Trigger the upload button first to reveal input
-                const uploadBtn = document.querySelector('.f02f0e25')
-                    || Array.from(document.querySelectorAll('.ds-icon-button'))
-                        .find(b => !b.textContent.trim() && !b.disabled);
-                if (uploadBtn) {{
-                    uploadBtn.click();
-                    // Wait a tick for input to appear
-                    return 'clicked_upload';
-                }}
-                return 'no upload mechanism found';
-            }}
-            return 'found_input';
-        }})()
-        """
-        result, code = self.a11y.eval_js(js)
-        if code != 0:
-            return False
-
-        # Now set the file value using JS
-        js2 = f"""
-        (function() {{
-            const input = document.querySelector('input[type="file"]');
-            if (!input) return 'no input';
-            // Create a DataTransfer object to simulate file selection
-            const dt = new DataTransfer();
-            // We cannot directly set files from local path due to security
-            // Instead, trigger the input for manual selection or use a different approach
-            input.dispatchEvent(new Event('click', {{ bubbles: true }}));
-            return 'triggered';
-        }})()
-        """
-        result2, code2 = self.a11y.eval_js(js2)
-        # File upload via CDP is tricky — this triggers the dialog
-        # Full implementation would need CDP's DOM.setFileInputFiles
-        return code2 == 0
+        return False
 
     # --- Message sending (with fallback) ---
 
@@ -739,10 +731,15 @@ class DeepSeekSemantics:
                     current_group = [ref]
                     current_indent = indent
             else:
-                # Non-button line — only reset group if indentation decreases
-                # (we're moving out of the button container). Keep group if
-                # we're seeing child elements like "image" at deeper indent.
-                pass
+                indent_match = re.match(r'^(\s+)-', line)
+                if not current_group or current_indent is None or not indent_match:
+                    continue
+                indent = len(indent_match.group(1))
+                if indent <= current_indent:
+                    if len(current_group) >= 3:
+                        button_groups.append(current_group)
+                    current_group = []
+                    current_indent = None
 
         if len(current_group) >= 3:
             button_groups.append(current_group)
@@ -1433,6 +1430,8 @@ class MultiRoundChat:
         if not self._wait_until_ready(timeout=30):
             return None
 
+        baseline = self._message_tail_signature(self.chat.get_messages())
+
         # Step 2: Send the message.
         if not self.chat.send_message(message):
             return None
@@ -1444,7 +1443,11 @@ class MultiRoundChat:
                 on_stream_start()
 
         # Step 4: Wait for streaming to finish and capture response.
-        response = self._wait_for_complete_response(timeout=timeout)
+        response = self._wait_for_complete_response(
+            user_message=message,
+            timeout=timeout,
+            baseline=baseline,
+        )
 
         if response is None:
             return None
@@ -1478,7 +1481,35 @@ class MultiRoundChat:
             time.sleep(0.5)
         return False
 
-    def _wait_for_complete_response(self, timeout: float = 120) -> Optional[str]:
+    @staticmethod
+    def _message_tail_signature(messages: list[Message], limit: int = 4) -> list[tuple[str, str]]:
+        return [(msg.role, msg.content) for msg in messages[-limit:]]
+
+    def _extract_turn_response(
+        self,
+        messages: list[Message],
+        user_message: str,
+        baseline: list[tuple[str, str]],
+    ) -> Optional[str]:
+        """Return the assistant reply for the current turn only after the tail changes."""
+        if baseline and self._message_tail_signature(messages, len(baseline)) == baseline:
+            return None
+
+        for idx in range(len(messages) - 1, -1, -1):
+            msg = messages[idx]
+            if msg.role != "user" or msg.content != user_message:
+                continue
+            if idx + 1 < len(messages) and messages[idx + 1].role == "assistant":
+                return messages[idx + 1].content
+            return None
+        return None
+
+    def _wait_for_complete_response(
+        self,
+        user_message: str,
+        timeout: float = 120,
+        baseline: Optional[list[tuple[str, str]]] = None,
+    ) -> Optional[str]:
         """Wait until streaming starts, then finishes, and return response.
 
         More reliable than message-count comparison because it uses the
@@ -1495,12 +1526,11 @@ class MultiRoundChat:
                 break
             time.sleep(0.3)
 
+        baseline = baseline or self._message_tail_signature(self.chat.get_messages())
+
         if not streaming_started:
-            # Model may have responded instantly; capture what we have
-            msgs = self.chat.get_messages()
-            if msgs and msgs[-1].role == "assistant":
-                return msgs[-1].content
-            return None
+            # Model may have responded instantly; only accept a fresh reply for this turn.
+            return self._extract_turn_response(self.chat.get_messages(), user_message, baseline)
 
         # Phase 2: Wait for streaming to finish
         while time.time() < deadline:
@@ -1509,8 +1539,9 @@ class MultiRoundChat:
                 # Give DOM one more moment to settle
                 time.sleep(0.5)
                 msgs = self.chat.get_messages()
-                if msgs and msgs[-1].role == "assistant":
-                    return msgs[-1].content
+                response = self._extract_turn_response(msgs, user_message, baseline)
+                if response:
+                    return response
             time.sleep(0.5)
 
         return None
@@ -1546,6 +1577,8 @@ class MultiRoundChat:
         if not self._wait_until_ready(timeout=30):
             return None
 
+        baseline = self._message_tail_signature(self.chat.get_messages())
+
         if not self.chat.send_message(message):
             return None
 
@@ -1555,23 +1588,21 @@ class MultiRoundChat:
 
         while time.time() < deadline:
             state = self.chat.semantics.get_page_state()
+            msgs = self.chat.get_messages()
+            current = self._extract_turn_response(msgs, message, baseline)
 
-            if state.is_streaming or response_started:
+            if state.is_streaming or current is not None or response_started:
                 response_started = True
-                msgs = self.chat.get_messages()
-                if msgs and msgs[-1].role == "assistant":
-                    current = msgs[-1].content
-                    if len(current) > len(last_content):
-                        delta = current[len(last_content):]
-                        if on_token:
-                            on_token(delta, current)
-                        last_content = current
+                if current and len(current) > len(last_content):
+                    delta = current[len(last_content):]
+                    if on_token:
+                        on_token(delta, current)
+                    last_content = current
 
             if response_started and not state.is_streaming:
                 # Streaming finished, do one final capture
-                msgs = self.chat.get_messages()
-                if msgs and msgs[-1].role == "assistant":
-                    final = msgs[-1].content
+                final = self._extract_turn_response(self.chat.get_messages(), message, baseline)
+                if final:
                     trace = self.chat.get_thinking_trace()
                     turn = ChatTurn(
                         user_message=message,
@@ -1584,9 +1615,8 @@ class MultiRoundChat:
             time.sleep(poll_interval)
 
         # Timeout — capture whatever we have
-        msgs = self.chat.get_messages()
-        if msgs and msgs[-1].role == "assistant":
-            final = msgs[-1].content
+        final = self._extract_turn_response(self.chat.get_messages(), message, baseline)
+        if final:
             trace = self.chat.get_thinking_trace()
             turn = ChatTurn(
                 user_message=message,

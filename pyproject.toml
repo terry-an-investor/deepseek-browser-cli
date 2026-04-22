@@ -36,7 +36,7 @@ deepseek-agent = "deepseek_browser_cli.agent_cli:main"
 deepseek-mcp = "deepseek_browser_cli.mcp_server:main"
 
 [project.urls]
-Homepage = "https://github.com/terry-an-investor/deepseek-browser-cli"
+Homepage = "https://github.com/zhaozhoubin/deepseek-web-cli"
 Repository = "https://github.com/zhaozhoubin/deepseek-web-cli"
 Issues = "https://github.com/zhaozhoubin/deepseek-web-cli/issues"
 
@@ -49,9 +49,6 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
 ]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
