@@ -75,19 +75,22 @@ async def deepseek_chat(message: str, ctx: Context) -> str:
     # 1. Observe and wait until ready
     max_wait = 30
     waited = 0
+    obs = bridge.observe()
     while waited < max_wait:
-        obs = bridge.observe()
         state = obs["page_state"]
-        if not state["is_streaming"] and state["can_send"]:
+        if bridge._is_ready(state):
             break
         await asyncio.sleep(1)
         waited += 1
+        obs = bridge.observe()
 
     if waited >= max_wait:
         return json.dumps(
             {"success": False, "error": "Timeout waiting for page to be ready"},
             ensure_ascii=False,
         )
+
+    baseline = bridge._response_marker(obs)
 
     # 2. Send message
     send_result = bridge.act({"type": "send", "params": {"text": message}})
@@ -102,11 +105,11 @@ async def deepseek_chat(message: str, ctx: Context) -> str:
     max_wait = 120
     waited = 0
     stuck_counter = 0
-    last_message_count = obs["page_state"]["message_count"]
+    last_message_count = baseline["message_count"]
     while waited < max_wait:
         obs = bridge.observe()
         state = obs["page_state"]
-        if not state["is_streaming"] and state["can_send"]:
+        if bridge._has_new_response(baseline, obs) and bridge._is_ready(state):
             break
 
         # Detect stuck state: no streaming but also no new messages for 10+ seconds
@@ -138,6 +141,11 @@ async def deepseek_chat(message: str, ctx: Context) -> str:
 
     # 4. Extract response
     obs = bridge.observe()
+    if not bridge._has_new_response(baseline, obs):
+        return json.dumps(
+            {"success": False, "error": "No new response detected"},
+            ensure_ascii=False,
+        )
     last = obs.get("last_response", {})
     if not last.get("exists"):
         return json.dumps(

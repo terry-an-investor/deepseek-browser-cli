@@ -5,10 +5,10 @@ and accept JSON actions. The AI agent (you) reads the JSON,
 reasons about it, and decides what to do.
 
 Usage:
-    $ deepseek-browser observe --session test
+    $ deepseek-agent observe --session test
     {"page_state": {"can_send": true, ...}, ...}
 
-    $ deepseek-browser act --session test --action '{"type": "send", "params": {"text": "hi"}}'
+    $ deepseek-agent act --session test --action '{"type": "send", "params": {"text": "hi"}}'
     {"success": true}
 """
 
@@ -42,7 +42,7 @@ def cmd_turn(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="deepseek-browser")
+    parser = argparse.ArgumentParser(prog="deepseek-agent")
     parser.add_argument("--session", "-s", default="default", help="Session name")
     parser.add_argument("--auto-connect", "-a", action="store_true", help="Connect to running Chrome")
     parser.add_argument("--pretty", "-p", action="store_true", help="Pretty-print JSON output")

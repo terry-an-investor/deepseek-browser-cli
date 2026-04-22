@@ -680,12 +680,23 @@ class DeepSeekAgentBridge:
 
         Returns the final observation including the response.
         """
+        deadline = time.time() + timeout
+
         # Initial observation
         obs_before = self.observe()
 
         # Wait until ready
-        if obs_before["page_state"]["is_streaming"]:
-            self._wait_until_ready(timeout=30)
+        if not self._is_ready(obs_before["page_state"]):
+            remaining = max(0.0, deadline - time.time())
+            if remaining <= 0 or not self._wait_until_ready(timeout=remaining):
+                return {
+                    "success": False,
+                    "error": "Timeout waiting for page to be ready",
+                    "observation": self.observe(),
+                    "user_message": message,
+                    "assistant_response": None,
+                }
+            obs_before = self.observe()
 
         # Send message
         send_result = self.act({"type": "send", "params": {"text": message}})
@@ -697,48 +708,100 @@ class DeepSeekAgentBridge:
             }
 
         # Wait for response
-        self._wait_for_response(timeout=timeout)
+        remaining = max(0.0, deadline - time.time())
+        if remaining <= 0 or not self._wait_for_response(timeout=remaining, baseline_observation=obs_before):
+            obs_after = self.observe()
+            return {
+                "success": False,
+                "error": "Timeout waiting for response",
+                "observation": obs_after,
+                "user_message": message,
+                "assistant_response": obs_after.get("last_response", {}).get("content"),
+            }
 
         # Final observation with response
         obs_after = self.observe()
+        last_response = obs_after.get("last_response", {})
+        if not last_response.get("exists"):
+            return {
+                "success": False,
+                "error": "No response detected",
+                "observation": obs_after,
+                "user_message": message,
+                "assistant_response": None,
+            }
 
         return {
             "success": True,
             "observation": obs_after,
             "user_message": message,
-            "assistant_response": obs_after.get("last_response", {}).get("content"),
+            "assistant_response": last_response.get("content"),
         }
+
+    @staticmethod
+    def _is_ready(state: dict) -> bool:
+        """Return whether the page can accept a new message."""
+        return state.get("can_send", state.get("has_input") and not state.get("is_streaming"))
+
+    @staticmethod
+    def _response_marker(observation: dict) -> dict:
+        """Capture the conversation state needed to detect a new assistant reply."""
+        messages = observation.get("messages", [])
+        last_response = observation.get("last_response", {})
+        thinking = last_response.get("thinking", {})
+        return {
+            "message_count": observation.get("page_state", {}).get("message_count", 0),
+            "assistant_count": sum(1 for msg in messages if msg.get("role") == "assistant"),
+            "last_response_content": last_response.get("content"),
+            "thinking_content": thinking.get("content"),
+            "thinking_time": thinking.get("time"),
+        }
+
+    @classmethod
+    def _has_new_response(cls, baseline: dict, observation: dict) -> bool:
+        """Return whether observation contains a newer assistant reply than baseline."""
+        current = cls._response_marker(observation)
+        if current["assistant_count"] > baseline["assistant_count"]:
+            return True
+        if (
+            current["message_count"] > baseline["message_count"]
+            and current["last_response_content"]
+            and current["last_response_content"] != baseline["last_response_content"]
+        ):
+            return True
+        if (
+            current["thinking_content"]
+            and current["thinking_content"] != baseline["thinking_content"]
+            and current["thinking_time"] != baseline["thinking_time"]
+        ):
+            return True
+        return False
 
     def _wait_until_ready(self, timeout: float = 30) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
             state = self.observe()["page_state"]
-            if not state["is_streaming"] and state["has_input"]:
+            if self._is_ready(state):
                 return True
             time.sleep(0.5)
         return False
 
-    def _wait_for_response(self, timeout: float = 120) -> bool:
-        """Wait for streaming to start then finish."""
+    def _wait_for_response(self, timeout: float = 120, baseline_observation: Optional[dict] = None) -> bool:
+        """Wait for a fresh response to arrive and settle."""
         deadline = time.time() + timeout
-
-        # Wait for streaming to start
         streaming_started = False
+        baseline = self._response_marker(baseline_observation) if baseline_observation else None
+
         while time.time() < deadline:
-            if self.observe()["page_state"]["is_streaming"]:
+            obs = self.observe()
+            state = obs["page_state"]
+            if state["is_streaming"]:
                 streaming_started = True
-                break
-            time.sleep(0.3)
-
-        if not streaming_started:
-            return False
-
-        # Wait for streaming to finish
-        while time.time() < deadline:
-            if not self.observe()["page_state"]["is_streaming"]:
+            has_new_response = baseline is None or self._has_new_response(baseline, obs)
+            if has_new_response and not state["is_streaming"] and self._is_ready(state):
                 time.sleep(0.5)  # Let DOM settle
                 return True
-            time.sleep(0.5)
+            time.sleep(0.5 if streaming_started else 0.3)
 
         return False
 
