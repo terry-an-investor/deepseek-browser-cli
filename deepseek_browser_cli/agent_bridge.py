@@ -611,7 +611,7 @@ class DeepSeekAgentBridge:
 
         Args:
             action: dict with keys:
-                - "type": "click" | "type" | "press" | "send" | "toggle" | "mode" | "click_action" | "eval"
+                - "type": "click" | "type" | "press" | "send" | "toggle" | "mode" | "new_chat" | "click_action" | "eval"
                 - "params": dict of parameters for the action type
 
         Returns:
@@ -646,6 +646,9 @@ class DeepSeekAgentBridge:
 
             elif action_type == "mode":
                 result["success"] = self.actor.select_mode(params["mode"])
+
+            elif action_type == "new_chat":
+                result["success"] = self.semantics.new_conversation()
 
             elif action_type == "click_action":
                 result["success"] = self.actor.click_response_action(params["action"])
@@ -762,6 +765,11 @@ class DeepSeekAgentBridge:
         """Return whether observation contains a newer assistant reply than baseline."""
         current = cls._response_marker(observation)
         if current["assistant_count"] > baseline["assistant_count"]:
+            return True
+        if (
+            current["last_response_content"]
+            and current["last_response_content"] != baseline["last_response_content"]
+        ):
             return True
         if (
             current["message_count"] > baseline["message_count"]

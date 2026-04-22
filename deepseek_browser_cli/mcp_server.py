@@ -265,10 +265,15 @@ async def deepseek_new_chat(ctx: Context) -> str:
         JSON with success status.
     """
     bridge = _get_bridge(ctx)
-    result = bridge.act({"type": "eval", "params": {"script": "window.location.href = 'https://chat.deepseek.com'"}})
+    result = bridge.act({"type": "new_chat", "params": {}})
     await asyncio.sleep(2)
+    obs = bridge.observe()
     return json.dumps(
-        {"success": result.get("success", False), "url": "https://chat.deepseek.com"},
+        {
+            "success": result.get("success", False),
+            "url": obs.get("page_state", {}).get("url"),
+            "is_initial_page": obs.get("page_state", {}).get("is_initial_page"),
+        },
         ensure_ascii=False,
     )
 
