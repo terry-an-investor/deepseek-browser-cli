@@ -17,15 +17,15 @@ This file is the implementation playbook for AI coding agents.
 4. New public APIs belong in their semantic module (`primitives`, `semantics`, `chat`). Re-export through `deepseek_model.py` if external callers need it.
 5. Layer 2 actions rely on multiple fallback strategies (a11y tree → JS → broader search). Maintain this pattern for resilience against UI changes.
 
-## Performance and Reliability Invariants
+## Architecture Invariants
 
-1. CDP subprocesses are the bottleneck: avoid redundant calls in hot loops.
-2. Prefer `get_fast_state()` for polling; do not replace it with heavier snapshots.
-3. Invalidate caches after mutations (`click`, `type`, `press`, `eval_js`).
-4. Keep `DeepSeekSemantics._eval_json()` compatible with doubles that may not implement `eval_json`.
-5. Do not rely on volatile CSS classes; prefer semantic text/ARIA cues.
-6. Treat message history as virtualized: visible message count may differ from total.
-7. Mode switching is only reliable before the first user message is sent.
+1. **agent-browser is the CDP bridge.** Every CDP operation spawns a fresh `agent-browser` subprocess. `A11yPrimitives` caches snapshots (150ms TTL) and URLs (2s TTL); mutating actions (`click`, `type`, `press`, `eval_js`) invalidate the cache.
+2. **Polling uses lightweight `get_fast_state()`.** A single JS eval returning `{has_input, is_streaming, message_count}`. Full `get_page_state()` with snapshot + multi-strategy detection is only used when complete state is needed.
+3. **Layer 2 fallback strategies are intentional.** Every semantic action (click, send, parse) tries a11y-tree first, then JS fallback, then broader search. This resilience against UI changes is core to the design.
+4. **`_eval_json()` has dual paths.** Prefers `a11y.eval_json()` if available; falls back to `eval_js` + manual unwrapping. Test doubles (`FakeA11y`) only implement `eval_js`.
+5. **Semantic selectors over CSS classes.** The codebase avoids brittle class names. Prefer text content ("已思考"), ARIA roles, or structural markers.
+6. **Messages are virtualized.** DeepSeek only renders visible messages in the DOM. `get_messages()` returns viewport-visible messages; `get_all_messages()` scrolls to load history.
+7. **Mode is set before the first message.** Mode switching requires the initial page (no conversation started). After the first user message, the mode is locked.
 
 ## Test Requirements
 
@@ -46,7 +46,7 @@ When an interaction fails, inspect in this order:
 Before finishing, verify all items:
 
 - Relevant tests pass or are intentionally skipped with reason.
-- No added redundant CDP calls in critical paths.
-- Cache invalidation still occurs on mutating actions.
-- FakeA11y compatibility remains intact.
+- Polling paths still use `get_fast_state()`, not heavier snapshots.
+- Mutating actions still invalidate `A11yPrimitives` cache.
+- `FakeA11y` test doubles still pass without implementing `eval_json`.
 - Docs updated only where behavior/contract changed.
