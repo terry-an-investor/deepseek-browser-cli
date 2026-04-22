@@ -43,6 +43,79 @@ DEFAULT_USER_DATA_DIR = Path(
 ).expanduser()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse boolean-like environment variables."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _canonical_mode(mode: Optional[str]) -> Optional[str]:
+    """Normalize mode aliases to canonical mode names."""
+    if not mode:
+        return None
+    lowered = mode.strip().lower()
+    if lowered == "quick":
+        return "instant"
+    if lowered in ("instant", "expert"):
+        return lowered
+    return None
+
+
+DEFAULT_MODE_TOGGLES = {
+    "instant": {
+        "deep_thinking": _env_bool("DEEPSEEK_DEFAULT_THINKING_INSTANT", True),
+        "web_search": _env_bool("DEEPSEEK_DEFAULT_SEARCH_INSTANT", True),
+    },
+    "expert": {
+        "deep_thinking": _env_bool("DEEPSEEK_DEFAULT_THINKING_EXPERT", True),
+        "web_search": _env_bool("DEEPSEEK_DEFAULT_SEARCH_EXPERT", True),
+    },
+}
+
+
+def _apply_mode_default_toggles(bridge: DeepSeekAgentBridge, mode: Optional[str] = None) -> dict[str, Any]:
+    """Apply configured default toggles for the active mode."""
+    obs = bridge.observe()
+    state = obs.get("page_state", {})
+    canonical = _canonical_mode(mode) or _canonical_mode(state.get("mode"))
+    if canonical not in DEFAULT_MODE_TOGGLES or not state.get("has_input"):
+        return {
+            "mode": canonical,
+            "deep_thinking_enabled": state.get("deep_thinking_enabled"),
+            "web_search_enabled": state.get("web_search_enabled"),
+            "defaults": DEFAULT_MODE_TOGGLES.get(canonical),
+            "changed": [],
+        }
+
+    desired = DEFAULT_MODE_TOGGLES[canonical]
+    changed: list[str] = []
+
+    if bool(state.get("deep_thinking_enabled")) != desired["deep_thinking"]:
+        result = bridge.act({"type": "toggle", "params": {"feature": "deep_thinking"}})
+        if result.get("success"):
+            changed.append("deep_thinking")
+
+    if bool(state.get("web_search_enabled")) != desired["web_search"]:
+        result = bridge.act({"type": "toggle", "params": {"feature": "web_search"}})
+        if result.get("success"):
+            changed.append("web_search")
+
+    if changed:
+        time.sleep(0.2)
+        obs = bridge.observe()
+        state = obs.get("page_state", {})
+
+    return {
+        "mode": canonical,
+        "deep_thinking_enabled": state.get("deep_thinking_enabled"),
+        "web_search_enabled": state.get("web_search_enabled"),
+        "defaults": desired,
+        "changed": changed,
+    }
+
+
 def _is_cdp_ready(port: int) -> bool:
     """Return whether a Chrome CDP endpoint is listening on localhost."""
     try:
@@ -107,6 +180,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
     # Navigate to DeepSeek
     bridge.act({"type": "eval", "params": {"script": "window.location.href = 'https://chat.deepseek.com'"}})
     await asyncio.sleep(1)
+    _apply_mode_default_toggles(bridge)
     yield {"bridge": bridge}
 
 
@@ -444,9 +518,7 @@ async def deepseek_mode(mode: str, ctx: Context) -> str:
     """
     bridge = _get_bridge(ctx)
     # Accept both "instant" and "quick" (canonical internal name)
-    canonical = mode
-    if mode == "quick":
-        canonical = "instant"
+    canonical = _canonical_mode(mode)
     if canonical not in ("expert", "instant"):
         return json.dumps(
             {"success": False, "error": f"Unknown mode: {mode}. Use 'expert' or 'instant'."},
@@ -464,14 +536,17 @@ async def deepseek_mode(mode: str, ctx: Context) -> str:
             ensure_ascii=False,
         )
 
-    result = bridge.act({"type": "mode", "params": {"mode": mode}})
+    result = bridge.act({"type": "mode", "params": {"mode": canonical}})
     await asyncio.sleep(0.5)  # Let DOM update after mode switch
-    obs = bridge.observe()
-    state = obs["page_state"]
+    defaults = _apply_mode_default_toggles(bridge, canonical)
     return json.dumps(
         {
             "success": result.get("success", False),
-            "mode": state.get("mode"),
+            "mode": defaults.get("mode"),
+            "deep_thinking_enabled": defaults.get("deep_thinking_enabled"),
+            "web_search_enabled": defaults.get("web_search_enabled"),
+            "default_toggles": defaults.get("defaults"),
+            "toggles_changed": defaults.get("changed"),
         },
         ensure_ascii=False,
     )
@@ -487,11 +562,17 @@ async def deepseek_new_chat(ctx: Context) -> str:
     bridge = _get_bridge(ctx)
     obs = bridge.observe()
     if obs["page_state"]["is_initial_page"]:
+        defaults = _apply_mode_default_toggles(bridge, obs["page_state"].get("mode"))
         return json.dumps(
             {
                 "success": True,
                 "url": obs["page_state"]["url"],
                 "is_initial_page": True,
+                "mode": defaults.get("mode"),
+                "deep_thinking_enabled": defaults.get("deep_thinking_enabled"),
+                "web_search_enabled": defaults.get("web_search_enabled"),
+                "default_toggles": defaults.get("defaults"),
+                "toggles_changed": defaults.get("changed"),
             },
             ensure_ascii=False,
         )
@@ -507,11 +588,17 @@ async def deepseek_new_chat(ctx: Context) -> str:
             break
 
     obs = bridge.observe()
+    defaults = _apply_mode_default_toggles(bridge, obs.get("page_state", {}).get("mode"))
     return json.dumps(
         {
             "success": result.get("success", False) and obs.get("page_state", {}).get("is_initial_page", False),
             "url": obs.get("page_state", {}).get("url"),
             "is_initial_page": obs.get("page_state", {}).get("is_initial_page"),
+            "mode": defaults.get("mode"),
+            "deep_thinking_enabled": defaults.get("deep_thinking_enabled"),
+            "web_search_enabled": defaults.get("web_search_enabled"),
+            "default_toggles": defaults.get("defaults"),
+            "toggles_changed": defaults.get("changed"),
         },
         ensure_ascii=False,
     )
