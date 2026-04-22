@@ -587,8 +587,21 @@ class DeepSeekAgentBridge:
     then calls act() to execute. No hardcoded workflows.
     """
 
-    def __init__(self, session: str = "default", auto_connect: bool = False):
-        self.a11y = A11yPrimitives(session=session, auto_connect=auto_connect)
+    def __init__(
+        self,
+        session: str = "default",
+        auto_connect: bool = False,
+        cdp: Optional[str] = None,
+        profile: Optional[str] = None,
+        headed: bool = False,
+    ):
+        self.a11y = A11yPrimitives(
+            session=session,
+            auto_connect=auto_connect,
+            cdp=cdp,
+            profile=profile,
+            headed=headed,
+        )
         self.semantics = DeepSeekSemantics(self.a11y)
         self.observer = DeepSeekObserver(self.a11y, self.semantics)
         self.actor = DeepSeekActor(self.a11y, self.semantics)

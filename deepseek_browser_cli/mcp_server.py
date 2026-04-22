@@ -13,8 +13,12 @@ Tools:
 import asyncio
 import ast
 import json
+import os
+import socket
+import subprocess
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -26,13 +30,83 @@ from deepseek_browser_cli.agent_bridge import DeepSeekAgentBridge
 # Lifespan: one browser session for the whole MCP server lifetime
 # ---------------------------------------------------------------------------
 
+DEFAULT_CDP_PORT = int(os.environ.get("DEEPSEEK_CDP_PORT", "9222"))
+DEFAULT_CHROME_PATH = os.environ.get(
+    "DEEPSEEK_CHROME_PATH",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+)
+DEFAULT_USER_DATA_DIR = Path(
+    os.environ.get(
+        "DEEPSEEK_CHROME_USER_DATA_DIR",
+        str(Path.home() / ".deepseek-mcp-chrome"),
+    )
+).expanduser()
+
+
+def _is_cdp_ready(port: int) -> bool:
+    """Return whether a Chrome CDP endpoint is listening on localhost."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def _launch_chrome_with_debugging(port: int, chrome_path: str, user_data_dir: Path) -> None:
+    """Launch Chrome with remote debugging and a persistent profile directory."""
+    chrome_binary = Path(chrome_path).expanduser()
+    if not chrome_binary.exists():
+        raise FileNotFoundError(
+            f"Chrome executable not found: {chrome_binary}. "
+            "Set DEEPSEEK_CHROME_PATH to your Chrome binary path."
+        )
+
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(chrome_binary),
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_data_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://chat.deepseek.com",
+    ]
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _ensure_chrome_debugging(port: int, chrome_path: str, user_data_dir: Path) -> None:
+    """Ensure CDP Chrome is available; launch it if needed."""
+    if _is_cdp_ready(port):
+        return
+
+    _launch_chrome_with_debugging(port=port, chrome_path=chrome_path, user_data_dir=user_data_dir)
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        if _is_cdp_ready(port):
+            return
+        time.sleep(0.25)
+
+    raise RuntimeError(
+        f"Chrome CDP endpoint was not ready on port {port}. "
+        "Please verify Chrome can start with remote debugging."
+    )
+
+
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
     """Start the browser session when the MCP server starts."""
-    bridge = DeepSeekAgentBridge(session="mcp-server", auto_connect=True)
+    _ensure_chrome_debugging(
+        port=DEFAULT_CDP_PORT,
+        chrome_path=DEFAULT_CHROME_PATH,
+        user_data_dir=DEFAULT_USER_DATA_DIR,
+    )
+    bridge = DeepSeekAgentBridge(session="mcp-server", cdp=str(DEFAULT_CDP_PORT))
     # Navigate to DeepSeek
     bridge.act({"type": "eval", "params": {"script": "window.location.href = 'https://chat.deepseek.com'"}})
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
     yield {"bridge": bridge}
 
 

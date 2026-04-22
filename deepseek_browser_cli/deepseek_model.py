@@ -97,12 +97,25 @@ class A11yPrimitives:
     a11y tree exposed by agent-browser.
     """
 
-    def __init__(self, session: str = "default", auto_connect: bool = False):
+    def __init__(
+        self,
+        session: str = "default",
+        auto_connect: bool = False,
+        cdp: Optional[str] = None,
+        profile: Optional[str] = None,
+        headed: bool = False,
+    ):
         self.session = session
         self.auto_connect = auto_connect
         self._cmd_base = ["agent-browser", "--session", session]
-        if auto_connect:
+        if cdp:
+            self._cmd_base.extend(["--cdp", str(cdp)])
+        elif auto_connect:
             self._cmd_base.append("--auto-connect")
+        if profile:
+            self._cmd_base.extend(["--profile", profile])
+        if headed:
+            self._cmd_base.append("--headed")
 
     def _exec(self, *args, check: bool = False):
         cmd = self._cmd_base + list(args)
