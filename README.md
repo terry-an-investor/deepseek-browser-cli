@@ -1,117 +1,88 @@
 # DeepSeek Browser CLI
 
-Semantic automation for [chat.deepseek.com](https://chat.deepseek.com) over Chrome DevTools Protocol (CDP).
+Semantic browser automation for [chat.deepseek.com](https://chat.deepseek.com) via Chrome DevTools Protocol (CDP).
 
-Instead of driving brittle selectors directly, this project exposes DeepSeek-aware operations such as:
+Instead of brittle CSS selectors, this toolkit exposes DeepSeek-aware operations: send messages, read conversation state, switch modes, toggle features, and interact with responses. Multiple interfaces are provided so you can use it interactively, programmatically, or as an MCP server.
 
-- send message and wait for reply
-- read current conversation state
-- switch mode (`instant` / `expert`)
-- toggle deep thinking and web search
-- interact with latest response actions
+> **For educational and research use only.**
+> Use responsibly and in accordance with DeepSeek's Terms of Service.
 
-It is designed to be used in four ways:
+## Quick Start
 
-- `deepseek-browser`: interactive chat + passthrough to `agent-browser`
-- `deepseek-agent`: JSON observe/act/turn CLI for agents
-- `deepseek-mcp`: MCP server (stdio transport)
-- Python API: `DeepSeekChat`, `MultiRoundChat`, `DeepSeekAgentBridge`
-
-> **For educational and research use only**
->
-> Use this responsibly and in accordance with DeepSeek Terms of Service.
-
-## Installation
-
-Requirements:
+### Requirements
 
 - Python 3.11+
 - [uv](https://github.com/astral-sh/uv)
-- [agent-browser](https://www.npmjs.com/package/agent-browser)
+- [agent-browser](https://www.npmjs.com/package/agent-browser) (`npm install -g agent-browser`)
 - Google Chrome
 
 ```bash
-# Install CDP CLI
-npm install -g agent-browser
-
-# Install project dependencies
+# Install dependencies
 uv sync
 
-# Install test/dev dependencies
-uv sync --group dev
+# Run interactive chat
+uv run deepseek-browser --interactive
+
+# Or start the MCP server
+uv run deepseek-mcp
 ```
 
-## First-Time CDP Setup (Key Blocker)
+### First-Time Setup
 
-If MCP fails to connect, this is usually the issue.
+MCP auto-launches a dedicated Chrome instance with a persistent profile:
 
-Chrome remote debugging must run with a non-default user-data directory. MCP now auto-launches a dedicated Chrome instance with persistent profile by default:
+- **CDP port**: `9333`
+- **Profile**: `~/.deepseek-mcp-chrome`
+- **Chrome path**: `/Applications/Google Chrome.app` (macOS)
 
-- default CDP port: `9333`
-- default profile directory: `~/.deepseek-mcp-chrome`
-- default launch target: `/Applications/Google Chrome.app` (macOS, via `open -na`)
+1. Start MCP: `uv run deepseek-mcp`
+2. Chrome opens automatically — log into DeepSeek once
+3. Profile persists across restarts
 
-First run flow:
-
-1. Start MCP server: `uv run deepseek-mcp`
-2. Dedicated Chrome launches automatically
-3. Log into DeepSeek once in that window
-4. Later runs reuse the same profile and keep login state
-
-Supported overrides:
-
+Override via environment variables:
 - `DEEPSEEK_CDP_PORT`
 - `DEEPSEEK_CHROME_PATH`
 - `DEEPSEEK_CHROME_USER_DATA_DIR`
 
-### Parallel Daily Chrome Tip
+## Architecture
 
-Your daily Chrome and MCP Chrome can run in parallel.
+The codebase follows a three-layer architecture:
 
-Manual launch equivalent:
+| Layer | Module | Responsibility |
+|-------|--------|---------------|
+| **L1** | `primitives` | Generic CDP operations via `agent-browser` |
+| **L2** | `semantics` | DeepSeek-specific page actions with fallback strategies |
+| **L3** | `chat` | High-level conversational workflows |
 
-```bash
-open -na "/Applications/Google Chrome.app" --args \
-  --remote-debugging-port=9333 \
-  --user-data-dir="$HOME/.deepseek-mcp-chrome"
+Additional interfaces:
+- `agent_bridge` — JSON observe/act pattern for AI agents
+- `mcp_server` — MCP stdio server for tool clients
+- `cli` — Interactive terminal chat + raw CDP passthrough
 
-DEEPSEEK_CDP_PORT=9333 uv run deepseek-mcp
-```
+## Interfaces
 
-## Testing
-
-```bash
-# Safe default (live browser tests skipped unless enabled)
-uv run pytest -q
-
-# Run live end-to-end tests
-RUN_DEEPSEEK_E2E=1 uv run pytest -q
-```
-
-## CLI Usage
-
-### Interactive chat
+### 1. Interactive CLI
 
 ```bash
-uv run deepseek-browser --interactive
 uv run deepseek-browser --interactive --mode expert --thinking
-uv run deepseek-browser --interactive --auto-connect
 ```
 
-Slash commands in interactive mode:
+Slash commands:
 
-- `/new`
-- `/mode quick|expert`
-- `/think on|off`
-- `/search on|off`
-- `/history`
-- `/export`
-- `/copy`, `/regen`, `/like`, `/dislike`, `/share`
+| Command | Action |
+|---------|--------|
+| `/new` | Start fresh conversation |
+| `/mode quick\|expert` | Switch chat mode |
+| `/think on\|off` | Toggle deep thinking |
+| `/search on\|off` | Toggle web search |
+| `/history` | Show conversation history |
+| `/export` | Save as markdown |
+| `/copy`, `/regen`, `/like`, `/dislike`, `/share` | Response actions |
 
-### JSON agent CLI
+### 2. JSON Agent CLI
 
 ```bash
-# Observe current page state
+# Observe page state
 uv run deepseek-agent --session test --pretty observe
 
 # Execute one action
@@ -122,56 +93,32 @@ uv run deepseek-agent --session test act \
 uv run deepseek-agent --session test turn "What is 2+2?"
 ```
 
-### Passthrough to agent-browser
-
-```bash
-uv run deepseek-browser --session test snapshot
-uv run deepseek-browser --session test get url
-```
-
-## MCP Server
-
-Run:
+### 3. MCP Server
 
 ```bash
 uv run deepseek-mcp
-# or
-uv run python -m deepseek_browser_cli.mcp_server
 ```
 
-### MCP behavior
+**Tools:**
 
-- Ensures a CDP endpoint is available on startup
-- Auto-launches dedicated Chrome with persistent profile when needed
-- Uses low-latency chat polling (default `poll_interval=0.25`)
-- Emits incremental progress/log messages during streaming for clients that surface them
-- Applies mode defaults for think/search toggles on startup/mode switch/new chat
+| Tool | Args | Returns |
+|------|------|---------|
+| `deepseek_chat` | `message`, `timeout=120`, `poll_interval=0.25` | `{success, response, thinking?}` |
+| `deepseek_observe` | none | Full page state JSON |
+| `deepseek_toggle` | `feature: deep_thinking \| web_search` | Updated toggle state |
+| `deepseek_mode` | `mode: expert \| instant \| quick` | Mode + default toggles |
+| `deepseek_new_chat` | none | Fresh dialog with defaults applied |
 
-### MCP tools
+**Mode defaults** (override via env vars):
 
-| Tool | Args | Notes |
-|------|------|-------|
-| `deepseek_chat` | `message: str`, `timeout: float=120`, `poll_interval: float=0.25` | Returns JSON with `success`, `response`, optional `thinking` |
-| `deepseek_observe` | none | Full page observation JSON |
-| `deepseek_toggle` | `feature: deep_thinking \| web_search` | Manual toggle control |
-| `deepseek_mode` | `mode: expert \| instant \| quick` | Mode switch on initial page + default toggle application |
-| `deepseek_new_chat` | none | Start fresh dialog + default toggle application |
+| Mode | Deep Thinking | Web Search |
+|------|--------------|------------|
+| `instant` | `true` | `true` |
+| `expert` | `true` | `true` |
 
-### Mode-based default toggles
+Env vars: `DEEPSEEK_DEFAULT_THINKING_INSTANT`, `DEEPSEEK_DEFAULT_SEARCH_INSTANT`, `DEEPSEEK_DEFAULT_THINKING_EXPERT`, `DEEPSEEK_DEFAULT_SEARCH_EXPERT`
 
-Current defaults:
-
-- `instant`: `deep_thinking=true`, `web_search=true`
-- `expert`: `deep_thinking=true`, `web_search=true`
-
-Override with:
-
-- `DEEPSEEK_DEFAULT_THINKING_INSTANT`
-- `DEEPSEEK_DEFAULT_SEARCH_INSTANT`
-- `DEEPSEEK_DEFAULT_THINKING_EXPERT`
-- `DEEPSEEK_DEFAULT_SEARCH_EXPERT`
-
-### Example MCP client config
+**MCP client config example:**
 
 ```json
 {
@@ -185,102 +132,100 @@ Override with:
 }
 ```
 
-## Python API Examples
-
-### `DeepSeekChat`
+### 4. Python API
 
 ```python
-from deepseek_browser_cli.deepseek_model import ChatMode, DeepSeekChat
+from deepseek_browser_cli import DeepSeekChat, ChatMode, MultiRoundChat
 
+# Single-turn chat
 chat = DeepSeekChat(session="default", auto_connect=True)
 chat.goto("/")
 chat.select_mode(ChatMode.EXPERT)
-
-chat.send_message("Explain quantum computing in one paragraph")
+chat.send_message("Explain quantum computing")
 response = chat.wait_for_response(timeout=60)
-print(response)
-```
 
-### `MultiRoundChat`
-
-```python
-from deepseek_browser_cli.deepseek_model import ChatMode, MultiRoundChat
-
+# Multi-round with streaming
 chat = MultiRoundChat(
     session="my-chat",
     auto_connect=True,
     mode=ChatMode.EXPERT,
     enable_thinking=True,
-    enable_search=False,
 )
 
-def on_token(delta, full_text):
+def on_token(delta, full):
     print(delta, end="", flush=True)
 
 turn = chat.send_streaming("Write a haiku about AI", on_token=on_token)
-print("\\n---")
-print(turn.assistant_response)
 ```
 
-### `DeepSeekAgentBridge`
+## Project Structure
 
-```python
-from deepseek_browser_cli.agent_bridge import DeepSeekAgentBridge
+```
+deepseek_browser_cli/
+├── __init__.py          # Package exports
+├── models.py            # Data classes (ChatMode, Message, PageState, etc.)
+├── primitives.py        # Layer 1: A11yPrimitives (CDP bridge)
+├── semantics.py         # Layer 2: DeepSeekSemantics (page actions)
+├── chat.py              # Layer 3: DeepSeekChat, MultiRoundChat
+├── agent_bridge.py      # Observer + Actor + Bridge for AI agents
+├── agent_cli.py         # JSON CLI for agents
+├── mcp_server.py        # MCP stdio server
+└── cli/
+    └── __init__.py      # Interactive CLI + CDP passthrough
 
-bridge = DeepSeekAgentBridge(session="agent", auto_connect=True)
-obs = bridge.observe()
-print(obs["page_state"])
-
-result = bridge.run_turn("What is 2+2?")
-print(result["assistant_response"])
+tests/
+├── test_regressions.py  # Offline unit tests
+├── test_mcp.py          # MCP e2e tests
+├── test_mcp_mode.py     # Mode switching tests
+├── test_mcp_multiround.py
+├── test_multiround.py   # Agent bridge stress tests
+└── test_mcp_mode_debug.py
 ```
 
-## Performance Notes
+## Performance
 
-Recent hot-path optimizations include:
+Recent optimizations:
 
-- short-lived `snapshot()` and `get_url()` caching in `A11yPrimitives`
-- centralized `eval_json()` parsing path
-- lightweight `get_fast_state()` for tight polling loops
-- adaptive polling backoff in response-wait loops
-- reduced redundant JS eval in bridge page-state observation
+- **Snapshot/URL caching** — `A11yPrimitives` caches snapshots for 150ms and URLs for 2s, eliminating redundant subprocess calls within observation cycles
+- **`eval_json()`** — Centralized JSON parsing path for JS eval results
+- **`get_fast_state()`** — Lightweight single-JS-eval state check for tight polling loops (replaces expensive `get_page_state()` in hot paths)
+- **Adaptive polling backoff** — Response wait loops start at 0.2s and back off to 1s, reducing CPU while maintaining low latency
+- **Reduced redundant JS evals** — `_observe_page_state()` no longer runs duplicate toggle detection
 
-Remaining biggest opportunity:
+Biggest remaining opportunity: move from one-subprocess-per-CDP-call to a persistent `agent-browser` process or direct WebSocket CDP client.
 
-- move from one-subprocess-per-CDP-call to a persistent `agent-browser` process or direct CDP client
+## Testing
 
-## Debugging Tips
+```bash
+# Safe default (e2e tests skipped)
+uv run pytest -q
 
-Use CDP primitives directly when behavior is unclear:
+# Run live browser tests
+RUN_DEEPSEEK_E2E=1 uv run pytest -q
+```
+
+## Debugging
+
+Use CDP primitives directly:
 
 ```bash
 # Accessibility tree
 uv run deepseek-browser --session debug snapshot
 
-# URL and navigation state
-uv run deepseek-browser --session debug get url
-
-# Quick DOM probe
+# DOM probe
 uv run deepseek-browser --session debug eval '
 (() => JSON.stringify({
   hasTextarea: !!document.querySelector("textarea"),
-  title: document.title,
-  url: location.href
+  title: document.title
 }))()'
 ```
 
-Recommended order:
-
-1. `snapshot`
-2. `eval`
-3. `get url`
-
 ## Known Limitations
 
-- mode switching only works on initial page
-- file upload is not fully implemented
-- login/captcha is not automated
-- major DeepSeek UI changes may require selector/strategy updates
+- Mode switching only works on the initial page
+- File upload is not fully implemented
+- Login/captcha is not automated
+- Major DeepSeek UI changes may require selector updates
 
 ## License
 

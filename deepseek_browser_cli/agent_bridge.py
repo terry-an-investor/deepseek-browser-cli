@@ -20,11 +20,9 @@ import re
 import time
 from typing import Optional
 
-from deepseek_browser_cli.deepseek_model import (
-    A11yPrimitives,
-    ChatMode,
-    DeepSeekSemantics,
-)
+from deepseek_browser_cli.models import ChatMode
+from deepseek_browser_cli.primitives import A11yPrimitives
+from deepseek_browser_cli.semantics import DeepSeekSemantics
 
 
 # ---------------------------------------------------------------------------
