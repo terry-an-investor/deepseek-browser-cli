@@ -117,23 +117,45 @@ class A11yPrimitives:
         if headed:
             self._cmd_base.append("--headed")
 
+        # Caching: snapshot is expensive (subprocess call); cache briefly
+        # to avoid redundant calls within a single observation cycle.
+        self._snapshot_cache: Optional[tuple[str, float]] = None
+        self._snapshot_ttl = 0.15
+        self._url_cache: Optional[tuple[str, float]] = None
+        self._url_ttl = 2.0
+
     def _exec(self, *args, check: bool = False):
         cmd = self._cmd_base + list(args)
         return _run(cmd, check=check)
 
+    def invalidate_cache(self) -> None:
+        """Drop cached snapshot/URL after mutating operations."""
+        self._snapshot_cache = None
+        self._url_cache = None
+
     # --- Navigation ---
 
     def open_url(self, url: str) -> tuple[str, int]:
+        self.invalidate_cache()
         return self._exec("open", url)
 
     def get_url(self) -> str:
+        now = time.time()
+        if self._url_cache and now - self._url_cache[1] < self._url_ttl:
+            return self._url_cache[0]
         out, _ = self._exec("get", "url")
-        return out.strip()
+        url = out.strip()
+        self._url_cache = (url, now)
+        return url
 
     # --- Snapshot queries ---
 
     def snapshot(self) -> str:
+        now = time.time()
+        if self._snapshot_cache and now - self._snapshot_cache[1] < self._snapshot_ttl:
+            return self._snapshot_cache[0]
         out, _ = self._exec("snapshot")
+        self._snapshot_cache = (out, now)
         return out
 
     def find_elements(self, snapshot: str, role: Optional[str] = None, text_contains: Optional[str] = None) -> list[dict]:
@@ -170,39 +192,76 @@ class A11yPrimitives:
     # --- Interaction ---
 
     def click_by_ref(self, ref: str) -> bool:
+        self.invalidate_cache()
         _, code = self._exec("click", f"@{ref}")
         return code == 0
 
     def type_by_ref(self, ref: str, text: str) -> bool:
+        self.invalidate_cache()
         _, code = self._exec("type", f"@{ref}", text)
         return code == 0
 
     def press_key(self, key: str) -> bool:
+        self.invalidate_cache()
         _, code = self._exec("press", key)
         return code == 0
 
     def eval_js(self, script: str) -> tuple[str, int]:
+        # JS eval may mutate DOM; be conservative and invalidate cache.
+        self.invalidate_cache()
         return self._exec("eval", script)
+
+    def eval_json(self, script: str) -> Optional[dict]:
+        """Evaluate JS that returns JSON.stringify() and parse the result.
+
+        Handles the common double-wrapping from agent-browser eval output.
+        Returns None on any parse failure.
+        """
+        result, code = self.eval_js(script)
+        if code != 0 or not result:
+            return None
+        text = result.strip()
+        # Try direct JSON first (if agent-browser ever returns raw JSON)
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+        # Try unwrapping a JSON-string-as-Python-literal
+        try:
+            clean = ast.literal_eval(text)
+            if isinstance(clean, str):
+                data = json.loads(clean)
+                if isinstance(data, dict):
+                    return data
+        except (ValueError, SyntaxError, json.JSONDecodeError):
+            pass
+        return None
 
     # --- Waiting ---
 
     def wait_for_element(self, role: Optional[str] = None, text_contains: Optional[str] = None, timeout: float = 10, interval: float = 0.5) -> Optional[dict]:
         """Poll snapshot until element appears or timeout."""
         deadline = time.time() + timeout
+        current_interval = interval
         while time.time() < deadline:
             elem = self.find_first(self.snapshot(), role=role, text_contains=text_contains)
             if elem:
                 return elem
-            time.sleep(interval)
+            time.sleep(current_interval)
+            current_interval = min(current_interval * 1.5, 2.0)
         return None
 
     def wait_for_text_absent(self, text: str, timeout: float = 10, interval: float = 0.5) -> bool:
         """Wait until text disappears from snapshot (e.g. loading indicator)."""
         deadline = time.time() + timeout
+        current_interval = interval
         while time.time() < deadline:
             if text not in self.snapshot():
                 return True
-            time.sleep(interval)
+            time.sleep(current_interval)
+            current_interval = min(current_interval * 1.5, 2.0)
         return False
 
 
@@ -237,6 +296,66 @@ class DeepSeekSemantics:
 
     def __init__(self, layer1: A11yPrimitives):
         self.a11y = layer1
+
+    def _eval_json(self, script: str) -> Optional[dict]:
+        """Evaluate JS and parse JSON result with backward compatibility.
+
+        Prefers ``a11y.eval_json`` if available; otherwise falls back to
+        ``eval_js`` + manual unwrapping so existing test doubles and custom
+        adapters continue to work.
+        """
+        if hasattr(self.a11y, "eval_json"):
+            return self.a11y.eval_json(script)
+        result, code = self.a11y.eval_js(script)
+        if code != 0 or not result:
+            return None
+        text = result.strip()
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+        try:
+            clean = ast.literal_eval(text)
+            if isinstance(clean, str):
+                data = json.loads(clean)
+                if isinstance(data, dict):
+                    return data
+        except (ValueError, SyntaxError, json.JSONDecodeError):
+            pass
+        return None
+
+    # --- Fast state checks (single JS eval for polling loops) ---
+
+    def get_fast_state(self) -> dict:
+        """Return lightweight page state via one JS eval.
+
+        Suitable for tight polling loops — only checks streaming status,
+        input availability, and message count.  Much cheaper than
+        get_page_state() which does snapshot + URL + multi-strategy detection.
+        """
+        js = r"""
+        (function() {
+            const textarea = document.querySelector('textarea');
+            const hasInput = !!textarea;
+            const bodyText = document.body ? (document.body.innerText || '') : '';
+            const spinner = document.querySelector(
+                '.ds-loading, [class*="loading"], [class*="spinner"], [aria-busy="true"]'
+            );
+            const isStreaming = !!spinner || /正在思考|generating|thinking/i.test(bodyText);
+            const msgCount = document.querySelectorAll('.ds-message').length;
+            return JSON.stringify({has_input: hasInput, is_streaming: isStreaming, message_count: msgCount});
+        })()
+        """
+        data = self._eval_json(js)
+        if data:
+            return {
+                "has_input": data.get("has_input", False),
+                "is_streaming": data.get("is_streaming", False),
+                "message_count": data.get("message_count", 0),
+            }
+        return {"has_input": False, "is_streaming": False, "message_count": 0}
 
     # --- Page state ---
 
@@ -344,7 +463,7 @@ class DeepSeekSemantics:
             return JSON.stringify(info);
         })()
         """
-        dom_info = {
+        dom_info = self._eval_json(js) or {
             "is_initial_page": False,
             "has_input": False,
             "is_streaming": False,
@@ -352,14 +471,6 @@ class DeepSeekSemantics:
             "web_search": False,
             "mode": "unknown",
         }
-        result, code = self.a11y.eval_js(js)
-        if code == 0 and result:
-            try:
-                import ast, json
-                clean = ast.literal_eval(result.strip())
-                dom_info = json.loads(clean)
-            except (ValueError, SyntaxError, json.JSONDecodeError):
-                pass
 
         has_input = dom_info.get("has_input", False) or ("textarea" in snap or "textbox" in snap)
         # Fallback to a11y text heuristics if JS fails
@@ -399,7 +510,6 @@ class DeepSeekSemantics:
             result, code = self.a11y.eval_js(js_mode)
             if code == 0 and result:
                 try:
-                    import ast
                     mode = ast.literal_eval(result.strip()).strip('"')
                 except (ValueError, SyntaxError):
                     pass
@@ -1327,8 +1437,8 @@ class DeepSeekChat:
         last_streaming_check = False
 
         while time.time() < deadline:
-            state = self.semantics.get_page_state()
-            current_count = state.message_count
+            state = self.semantics.get_fast_state()
+            current_count = state["message_count"]
 
             # New message arrived
             if current_count > self._last_message_count:
@@ -1337,7 +1447,7 @@ class DeepSeekChat:
                 return msgs[-1].content if msgs else None
 
             # If streaming, wait longer without counting against timeout as aggressively
-            if state.is_streaming:
+            if state["is_streaming"]:
                 last_streaming_check = True
                 time.sleep(poll_interval)
                 continue
@@ -1356,8 +1466,8 @@ class DeepSeekChat:
         """Wait until page is ready for interaction (initial page or active chat)."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            state = self.semantics.get_page_state()
-            if state.is_initial_page or state.has_input:
+            state = self.semantics.get_fast_state()
+            if state["has_input"]:
                 return True
             time.sleep(0.5)
         return False
@@ -1511,11 +1621,13 @@ class MultiRoundChat:
         is available. Critical for multi-round continuity.
         """
         deadline = time.time() + timeout
+        current_interval = 0.3
         while time.time() < deadline:
-            state = self.chat.semantics.get_page_state()
-            if not state.is_streaming and state.has_input:
+            state = self.chat.semantics.get_fast_state()
+            if not state["is_streaming"] and state["has_input"]:
                 return True
-            time.sleep(0.5)
+            time.sleep(current_interval)
+            current_interval = min(current_interval * 1.3, 1.0)
         return False
 
     @staticmethod
@@ -1556,12 +1668,14 @@ class MultiRoundChat:
 
         # Phase 1: Wait for streaming to start (model picked up the message)
         streaming_started = False
+        poll_interval = 0.2
         while time.time() < deadline:
-            state = self.chat.semantics.get_page_state()
-            if state.is_streaming:
+            state = self.chat.semantics.get_fast_state()
+            if state["is_streaming"]:
                 streaming_started = True
                 break
-            time.sleep(0.3)
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.3, 0.5)
 
         baseline = baseline or self._message_tail_signature(self.chat.get_messages())
 
@@ -1570,27 +1684,31 @@ class MultiRoundChat:
             return self._extract_turn_response(self.chat.get_messages(), user_message, baseline)
 
         # Phase 2: Wait for streaming to finish
+        poll_interval = 0.3
         while time.time() < deadline:
-            state = self.chat.semantics.get_page_state()
-            if not state.is_streaming:
+            state = self.chat.semantics.get_fast_state()
+            if not state["is_streaming"]:
                 # Give DOM one more moment to settle
-                time.sleep(0.5)
+                time.sleep(0.3)
                 msgs = self.chat.get_messages()
                 response = self._extract_turn_response(msgs, user_message, baseline)
                 if response:
                     return response
-            time.sleep(0.5)
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.2, 1.0)
 
         return None
 
     def _wait_for_streaming(self, timeout: float = 5) -> bool:
         """Quick poll to detect if model started streaming."""
         deadline = time.time() + timeout
+        poll_interval = 0.2
         while time.time() < deadline:
-            state = self.chat.semantics.get_page_state()
-            if state.is_streaming:
+            state = self.chat.semantics.get_fast_state()
+            if state["is_streaming"]:
                 return True
-            time.sleep(0.3)
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.3, 0.5)
         return False
 
     # --- Streaming with real-time content ---
@@ -1623,12 +1741,13 @@ class MultiRoundChat:
         last_content = ""
         response_started = False
 
+        current_interval = max(0.1, poll_interval)
         while time.time() < deadline:
-            state = self.chat.semantics.get_page_state()
+            state = self.chat.semantics.get_fast_state()
             msgs = self.chat.get_messages()
             current = self._extract_turn_response(msgs, message, baseline)
 
-            if state.is_streaming or current is not None or response_started:
+            if state["is_streaming"] or current is not None or response_started:
                 response_started = True
                 if current and len(current) > len(last_content):
                     delta = current[len(last_content):]
@@ -1636,7 +1755,7 @@ class MultiRoundChat:
                         on_token(delta, current)
                     last_content = current
 
-            if response_started and not state.is_streaming:
+            if response_started and not state["is_streaming"]:
                 # Streaming finished, do one final capture
                 final = self._extract_turn_response(self.chat.get_messages(), message, baseline)
                 if final:
@@ -1649,7 +1768,8 @@ class MultiRoundChat:
                     self.history.append(turn)
                     return turn
 
-            time.sleep(poll_interval)
+            time.sleep(current_interval)
+            current_interval = min(current_interval * 1.2, max(poll_interval * 2, 1.0))
 
         # Timeout — capture whatever we have
         final = self._extract_turn_response(self.chat.get_messages(), message, baseline)

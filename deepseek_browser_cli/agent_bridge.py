@@ -57,45 +57,15 @@ class DeepSeekObserver:
 
     def _observe_page_state(self) -> dict:
         state = self.semantics.get_page_state()
-        # Mode is detected by get_page_state() via JS (initial page radios or conversation page label)
-        mode = state.mode
-
-        # Get actual toggle states via JS (snapshot can't detect CSS classes)
-        thinking_active = False
-        search_active = False
-        js = r"""
-        (function() {
-            const info = {};
-            const tBtn = Array.from(document.querySelectorAll('button, [role="button"]'))
-                .find(b => b.textContent.includes('深度思考'));
-            info.thinking = tBtn ? (tBtn.classList.contains('ds-toggle-button--selected') ||
-                                    tBtn.classList.contains('active')) : false;
-            const sBtn = Array.from(document.querySelectorAll('button, [role="button"]'))
-                .find(b => b.textContent.includes('智能搜索'));
-            info.search = sBtn ? (sBtn.classList.contains('ds-toggle-button--selected') ||
-                                  sBtn.classList.contains('active')) : false;
-            return JSON.stringify(info);
-        })()
-        """
-        result_js, code = self.a11y.eval_js(js)
-        if code == 0 and result_js:
-            try:
-                clean = ast.literal_eval(result_js.strip())
-                js_data = json.loads(clean)
-                thinking_active = js_data.get("thinking", False)
-                search_active = js_data.get("search", False)
-            except (ValueError, json.JSONDecodeError):
-                pass
-
         return {
             "url": state.url,
             "is_initial_page": state.is_initial_page,
             "has_input": state.has_input,
             "is_streaming": state.is_streaming,
             "message_count": state.message_count,
-            "mode": mode,
-            "deep_thinking_enabled": thinking_active,
-            "web_search_enabled": search_active,
+            "mode": state.mode,
+            "deep_thinking_enabled": state.deep_thinking_enabled,
+            "web_search_enabled": state.web_search_enabled,
             "can_send": state.has_input and not state.is_streaming,
             "notes": []
                 + (["page is on landing page, select mode first"] if state.is_initial_page else [])
@@ -800,11 +770,13 @@ class DeepSeekAgentBridge:
 
     def _wait_until_ready(self, timeout: float = 30) -> bool:
         deadline = time.time() + timeout
+        poll_interval = 0.2
         while time.time() < deadline:
-            state = self.observe()["page_state"]
-            if self._is_ready(state):
+            state = self.semantics.get_fast_state()
+            if state["has_input"] and not state["is_streaming"]:
                 return True
-            time.sleep(0.5)
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.3, 1.0)
         return False
 
     def _wait_for_response(self, timeout: float = 120, baseline_observation: Optional[dict] = None) -> bool:
@@ -812,17 +784,33 @@ class DeepSeekAgentBridge:
         deadline = time.time() + timeout
         streaming_started = False
         baseline = self._response_marker(baseline_observation) if baseline_observation else None
+        poll_interval = 0.2
+        start_time = time.time()
+        # Probe quickly for instant non-streaming replies, but avoid full
+        # observe() on every loop before streaming begins.
+        non_stream_probe_at = start_time + 0.25
 
         while time.time() < deadline:
-            obs = self.observe()
-            state = obs["page_state"]
+            now = time.time()
+            state = self.semantics.get_fast_state()
             if state["is_streaming"]:
                 streaming_started = True
-            has_new_response = baseline is None or self._has_new_response(baseline, obs)
-            if has_new_response and not state["is_streaming"] and self._is_ready(state):
-                time.sleep(0.5)  # Let DOM settle
-                return True
-            time.sleep(0.5 if streaming_started else 0.3)
+
+            # Check for response whenever page is ready (not streaming).
+            # For non-streaming instant replies, run periodic probes soon after
+            # send; once streaming has started, probe immediately after stop.
+            if not state["is_streaming"] and (streaming_started or now >= non_stream_probe_at):
+                obs = self.observe()
+                ready = self._is_ready(obs["page_state"])
+                has_new = baseline is None or self._has_new_response(baseline, obs)
+                if ready and has_new:
+                    time.sleep(0.2)  # Let DOM settle
+                    return True
+                if not streaming_started:
+                    non_stream_probe_at = now + 0.25
+
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.3, 0.5 if streaming_started else 0.3)
 
         return False
 
