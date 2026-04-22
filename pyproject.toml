@@ -1,11 +1,44 @@
 [project]
 name = "deepseek-browser-cli"
 version = "0.1.0"
-description = "CLI wrapper for agent-browser"
+description = "Browser automation for chat.deepseek.com via CDP — with MCP server, agent bridge, and programmatic API"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "terry-an-investor" },
+]
+keywords = [
+    "deepseek",
+    "browser-automation",
+    "cdp",
+    "mcp",
+    "ai-agent",
+    "chatbot",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mcp>=1.27.0",
+]
 
 [project.scripts]
 deepseek-browser = "deepseek_browser_cli.cli:main"
+deepseek-agent = "deepseek_browser_cli.agent_cli:main"
+deepseek-mcp = "deepseek_browser_cli.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/terry-an-investor/deepseek-browser-cli"
+Repository = "https://github.com/terry-an-investor/deepseek-browser-cli"
+Issues = "https://github.com/terry-an-investor/deepseek-browser-cli/issues"
 
 [build-system]
 requires = ["hatchling"]

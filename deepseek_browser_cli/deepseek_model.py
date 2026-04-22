@@ -70,6 +70,7 @@ class PageState:
     has_input: bool
     is_streaming: bool
     message_count: int
+    mode: str
     deep_thinking_enabled: bool
     web_search_enabled: bool
 
@@ -222,17 +223,155 @@ class DeepSeekSemantics:
         snap = self.a11y.snapshot()
         url = self.a11y.get_url()
         msgs = self._parse_messages_scoped(snap)
-        is_initial = "radiogroup" in snap and 'radio "快速模式"' in snap
-        has_input = "textarea" in snap or "textbox" in snap
-        is_streaming = "正在思考" in snap or "generating" in snap.lower()
-        deep_thinking = 'button "深度思考"' in snap
-        web_search = 'button "智能搜索"' in snap
+
+        # Language-agnostic detection via DOM structure
+        js = r"""
+        (function() {
+            const info = {
+                is_initial_page: false,
+                has_input: false,
+                is_streaming: false,
+                deep_thinking: false,
+                web_search: false
+            };
+
+            // Initial page: has a radiogroup with 2+ radios AND textarea AND no messages
+            const radios = document.querySelectorAll('[role="radiogroup"] radio, [role="radio"]');
+            const textarea = document.querySelector('textarea');
+            const messages = document.querySelectorAll('.ds-message');
+            if (radios.length >= 2 && textarea && messages.length === 0) {
+                info.is_initial_page = true;
+            }
+
+            // Has input field
+            info.has_input = !!textarea;
+
+            // Streaming: look for loading spinner or generating indicator
+            const spinner = document.querySelector('.ds-loading, [class*="loading"], [class*="spinner"]');
+            const streamingText = document.querySelector('[class*="streaming"], [class*="generating"]');
+            info.is_streaming = !!(spinner || streamingText);
+
+            // Toggle states via CSS class (language-agnostic)
+            const allBtns = document.querySelectorAll('button, [role="button"]');
+            allBtns.forEach(btn => {
+                const text = btn.textContent || '';
+                const isActive = btn.classList.contains('ds-toggle-button--selected') ||
+                                 btn.classList.contains('active') ||
+                                 btn.getAttribute('aria-pressed') === 'true';
+                // DeepThink toggle: icon or text contains "think" or "思考"
+                if ((text.includes('思考') || text.includes('Think') || text.includes('think')) &&
+                    text.length < 20) {
+                    info.deep_thinking = isActive;
+                }
+                // Search toggle: icon or text contains "search" or "搜索"
+                if ((text.includes('搜索') || text.includes('Search') || text.includes('search')) &&
+                    text.length < 20) {
+                    info.web_search = isActive;
+                }
+            });
+
+            // Mode detection (language-agnostic)
+            // Strategy 1: On initial page, check which radio is selected
+            const radios = document.querySelectorAll('[role="radio"], input[type="radio"]');
+            for (const radio of radios) {
+                const isChecked = radio.getAttribute('aria-checked') === 'true' || radio.checked;
+                const label = (radio.textContent || radio.getAttribute('aria-label') || '').trim();
+                if (isChecked) {
+                    if (/instant|快速|quick/i.test(label)) {
+                        info.mode = 'instant';
+                        break;
+                    }
+                    if (/expert|专家/i.test(label)) {
+                        info.mode = 'expert';
+                        break;
+                    }
+                }
+            }
+            // Strategy 2: On conversation page, look for heading "Start chatting with X"
+            if (!info.mode) {
+                const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6, div, span');
+                for (const h of headings) {
+                    const txt = h.textContent.trim();
+                    const match = txt.match(/(?:Start chatting with|开始使用)\s+(Instant|Expert|快速模式|专家模式)/i);
+                    if (match) {
+                        const m = match[1].toLowerCase();
+                        info.mode = (m === 'instant' || m === '快速模式') ? 'instant' : 'expert';
+                        break;
+                    }
+                }
+            }
+            // Strategy 3: Look for mode label on conversation page response headers
+            if (!info.mode) {
+                const modeLabels = document.querySelectorAll('[class*="mode"], [class*="model"]');
+                for (const label of modeLabels) {
+                    const txt = label.textContent.trim();
+                    if (/^Instant$|^快速模式$/i.test(txt)) {
+                        info.mode = 'instant';
+                        break;
+                    }
+                    if (/^Expert$|^专家模式$/i.test(txt)) {
+                        info.mode = 'expert';
+                        break;
+                    }
+                }
+            }
+
+            return JSON.stringify(info);
+        })()
+        """
+        dom_info = {"is_initial_page": False, "has_input": False, "is_streaming": False,
+                    "deep_thinking": False, "web_search": False}
+        result, code = self.a11y.eval_js(js)
+        if code == 0 and result:
+            try:
+                import ast, json
+                clean = ast.literal_eval(result.strip())
+                dom_info = json.loads(clean)
+            except (ValueError, json.JSONDecodeError):
+                pass
+
+        # Fallback to a11y text heuristics if JS fails
+        is_initial = dom_info.get("is_initial_page", False)
+        if not is_initial:
+            is_initial = "radiogroup" in snap and ('radio "快速模式"' in snap or 'radio "Instant"' in snap)
+
+        has_input = dom_info.get("has_input", False) or ("textarea" in snap or "textbox" in snap)
+        is_streaming = dom_info.get("is_streaming", False) or ("正在思考" in snap or "generating" in snap.lower())
+        deep_thinking = dom_info.get("deep_thinking", False) or ('button "深度思考"' in snap or 'button "DeepThink"' in snap)
+        web_search = dom_info.get("web_search", False) or ('button "智能搜索"' in snap or 'button "Search"' in snap)
+
+        # Detect mode: trust JS detection first, then query selected radio
+        mode = dom_info.get("mode", "unknown")
+        if (mode == "unknown" or not mode) and is_initial:
+            # Use JS to check which radio is actually selected
+            js_mode = r"""
+            (function() {
+                const radios = document.querySelectorAll('[role="radio"]');
+                for (const r of radios) {
+                    if (r.getAttribute('aria-checked') === 'true') {
+                        const text = r.textContent || '';
+                        if (/instant|快速/i.test(text)) return 'instant';
+                        if (/expert|专家/i.test(text)) return 'expert';
+                    }
+                }
+                return 'unknown';
+            })()
+            """
+            result, code = self.a11y.eval_js(js_mode)
+            if code == 0 and result:
+                try:
+                    import ast
+                    mode = ast.literal_eval(result.strip()).strip('"')
+                except (ValueError, SyntaxError):
+                    pass
+
         return PageState(
             url=url,
             is_initial_page=is_initial,
             has_input=has_input,
             is_streaming=is_streaming,
             message_count=len(msgs),
+            mode=mode,
             deep_thinking_enabled=deep_thinking,
             web_search_enabled=web_search,
         )
@@ -326,17 +465,48 @@ class DeepSeekSemantics:
         if not state.is_initial_page:
             return False
 
-        # Strategy 1: Click radio by accessible text
-        if self._try_click_radio(mode.value):
+        # Try text-based matching first (uses @ref click, more reliable)
+        labels = [mode.value]
+        if mode == ChatMode.QUICK:
+            labels.extend(["Instant", "快速模式"])
+        elif mode == ChatMode.EXPERT:
+            labels.extend(["Expert", "专家模式"])
+
+        for label in labels:
+            if self._try_click_radio(label):
+                import time
+                time.sleep(0.5)
+                return True
+
+        # Fallback: index-based JS click
+        target_index = 0 if mode == ChatMode.QUICK else 1
+        js = f"""
+        (function() {{
+            const radios = document.querySelectorAll('[role="radio"], input[type="radio"]');
+            if (radios.length >= {target_index + 1}) {{
+                const radio = radios[{target_index}];
+                radio.click();
+                radio.focus();
+                radio.setAttribute('aria-checked', 'true');
+                if (radio.tagName === 'INPUT') radio.checked = true;
+                radio.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return 'clicked';
+            }}
+            return 'not found';
+        }})()
+        """
+        result, code = self.a11y.eval_js(js)
+        if code == 0 and "clicked" in result:
+            import time
+            time.sleep(0.5)
             return True
 
-        # Strategy 2: Click by parent text containing mode name (original approach)
-        if self._try_click_by_parent_text(mode.value):
-            return True
-
-        # Strategy 3: JavaScript fallback
-        if self._try_click_mode_via_js(mode.value):
-            return True
+        # Final fallback: parent text matching
+        for label in labels:
+            if self._try_click_by_parent_text(label):
+                return True
+            if self._try_click_mode_via_js(label):
+                return True
 
         return False
 
@@ -481,12 +651,16 @@ class DeepSeekSemantics:
     # --- Message sending (with fallback) ---
 
     def send_message(self, text: str) -> bool:
-        """Send a message using the best available strategy."""
+        """Send a message using the best available strategy.
+
+        Uses CSS selectors instead of @ref to avoid SIGTRAP crashes on macOS
+        when Playwright interacts with Chromium via CDP.
+        """
         if not text or not text.strip():
             return False
 
-        # Strategy 1: Ref-based interaction (most reliable)
-        if self._try_send_via_ref(text):
+        # Strategy 1: CSS selector via agent-browser fill (avoids SIGTRAP)
+        if self._try_send_via_selector(text):
             return True
 
         # Strategy 2: JavaScript fallback
@@ -495,17 +669,21 @@ class DeepSeekSemantics:
 
         return False
 
-    def _try_send_via_ref(self, text: str) -> bool:
+    def _try_send_via_selector(self, text: str) -> bool:
+        """Strategy 1: Find textarea via CSS selector and fill."""
+        # Use agent-browser snapshot to detect input type
         snap = self.a11y.snapshot()
-        elem = self.a11y.find_first(snap, role="textbox")
-        if not elem or not elem.get("ref"):
+        selector = "textarea" if "textarea" in snap else "input[type=text]"
+
+        # Use agent-browser fill + press commands (CSS selectors, not @ref)
+        cmd = self.a11y._cmd_base + ["fill", selector, text]
+        _, code = _run(cmd)
+        if code != 0:
             return False
-        ref = elem["ref"]
-        return (
-            self.a11y.click_by_ref(ref)
-            and self.a11y.type_by_ref(ref, text)
-            and self.a11y.press_key("Enter")
-        )
+
+        cmd = self.a11y._cmd_base + ["press", "Enter"]
+        _, code = _run(cmd)
+        return code == 0
 
     def _try_send_via_js(self, text: str) -> bool:
         safe = json.dumps(text)
@@ -708,8 +886,62 @@ class DeepSeekSemantics:
     # --- Message parsing (FIXED: scoped to main chat area) ---
 
     def get_messages(self) -> list[Message]:
+        """Extract visible messages from the current DOM.
+
+        DeepSeek uses a virtual list that only renders visible messages.
+        This returns only the messages currently in the viewport — which
+        is correct for real-time observation (the latest message is
+        typically visible after sending).
+
+        For full history, use get_all_messages().
+        """
         snap = self.a11y.snapshot()
         return self._parse_messages_scoped(snap)
+
+    def get_all_messages(self) -> list[Message]:
+        """Extract all messages by scrolling through the virtual list.
+
+        Slow — only use when you need complete conversation history.
+        """
+        self._scroll_to_top_and_load_messages()
+        snap = self.a11y.snapshot()
+        return self._parse_messages_scoped(snap)
+
+    def _scroll_to_top_and_load_messages(self, timeout: float = 5.0) -> None:
+        """Scroll to the top of the chat to load all virtualized messages."""
+        js = r"""
+        (function() {
+            const chatContainer = document.querySelector('.ds-virtual-list, [class*="virtual-list"], .ds-chat-container');
+            if (chatContainer) {
+                chatContainer.scrollTop = 0;
+            } else {
+                window.scrollTo(0, 0);
+            }
+            // Also try scrolling the main content area
+            const main = document.querySelector('main, [class*="chat-content"], [class*="conversation"]');
+            if (main) main.scrollTop = 0;
+            return 'scrolled';
+        })()
+        """
+        self.a11y.eval_js(js)
+        # Wait a bit for the virtual list to render items
+        import time
+        time.sleep(0.5)
+
+        # Check if we need to wait for more messages to load
+        deadline = time.time() + timeout
+        last_count = 0
+        while time.time() < deadline:
+            result, code = self.a11y.eval_js("document.querySelectorAll('.ds-message').length")
+            if code == 0 and result:
+                try:
+                    count = int(result.strip().strip('"'))
+                    if count == last_count and count > 0:
+                        break  # Stabilized
+                    last_count = count
+                except ValueError:
+                    pass
+            time.sleep(0.3)
 
     def _parse_messages_scoped(self, snapshot: str) -> list[Message]:
         """Parse messages from the main chat area using DOM extraction.
@@ -720,6 +952,10 @@ class DeepSeekSemantics:
         # DeepSeek renders messages in .ds-message containers. User messages have
         # an additional wrapper class (e.g. d29f3d7d) before .ds-message, while
         # assistant messages have only .ds-message.
+        #
+        # Thinking traces: When deep thinking is on, assistant messages contain
+        # .ds-think-content containers with their own .ds-markdown children.
+        # The actual response is in a .ds-markdown that is NOT inside .ds-think-content.
         js = r"""
         (function() {
             const results = [];
@@ -737,15 +973,27 @@ class DeepSeekSemantics:
                 let content = text;
 
                 if (!isUser) {
-                    // For assistant messages, prefer the actual rendered markdown response
-                    // over the full textContent which includes thinking traces.
-                    const markdownEl = el.querySelector('.ds-markdown');
-                    if (markdownEl) {
-                        content = markdownEl.textContent.trim();
+                    // For assistant messages, find .ds-markdown that is NOT inside
+                    // a .ds-think-content container (those are thinking traces).
+                    const allMarkdowns = el.querySelectorAll('.ds-markdown');
+                    let responseMarkdown = null;
+                    allMarkdowns.forEach(md => {
+                        if (!md.closest('.ds-think-content')) {
+                            responseMarkdown = md;
+                        }
+                    });
+                    if (responseMarkdown) {
+                        content = responseMarkdown.textContent.trim();
                     } else {
                         // Fallback: strip thinking trace from raw textContent
+                        // Pattern 1: completed thinking "已思考（用时 X 秒）"
                         const thinkMatch = text.match(/已思考[\s\S]*?秒[）)]?(.*)/);
-                        if (thinkMatch) content = thinkMatch[1].trim();
+                        if (thinkMatch) {
+                            content = thinkMatch[1].trim();
+                        } else {
+                            // Pattern 2: in-progress thinking placeholder "正在思考"
+                            content = text.replace(/^(正在思考\s*)+/, '');
+                        }
                     }
                 }
 
@@ -851,6 +1099,61 @@ class DeepSeekSemantics:
         return self._parse_thinking(snap)
 
     def _parse_thinking(self, snapshot: str) -> Optional[ThinkingTrace]:
+        # Primary: DOM-based extraction from .ds-think-content containers.
+        js = r"""
+        (function() {
+            const result = {exists: false, time: null, content: null};
+
+            // Find the last assistant message with thinking content
+            const msgElements = document.querySelectorAll('.ds-message');
+            let lastAssistantMsg = null;
+            for (let i = msgElements.length - 1; i >= 0; i--) {
+                const classes = (msgElements[i].className || '').split(/\s+/).filter(Boolean);
+                if (classes[0] === 'ds-message') {
+                    lastAssistantMsg = msgElements[i];
+                    break;
+                }
+            }
+            if (!lastAssistantMsg) return JSON.stringify(result);
+
+            // Look for thinking container
+            const thinkContainer = lastAssistantMsg.querySelector('.ds-think-content');
+            if (!thinkContainer) return JSON.stringify(result);
+
+            result.exists = true;
+
+            // Extract thinking time from header text (e.g., "已思考（用时 4 秒）")
+            const headerEl = lastAssistantMsg.querySelector('[class*="think"], .ds-message > div:first-child');
+            const fullText = lastAssistantMsg.textContent;
+            const timeMatch = fullText.match(/已思考[（(]用时\s*(\d+)\s*秒[）)]/);
+            if (timeMatch) {
+                result.time = timeMatch[1] + ' 秒';
+            }
+
+            // Collect all thinking markdowns
+            const thinkMarkdowns = thinkContainer.querySelectorAll('.ds-markdown');
+            const parts = [];
+            thinkMarkdowns.forEach(md => {
+                const text = md.textContent.trim();
+                if (text) parts.push(text);
+            });
+            result.content = parts.join('\n');
+
+            return JSON.stringify(result);
+        })()
+        """
+        result, code = self.a11y.eval_js(js)
+        if code == 0 and result:
+            try:
+                import ast, json
+                clean = ast.literal_eval(result.strip())
+                data = json.loads(clean)
+                if data.get("exists") and data.get("content"):
+                    return ThinkingTrace(content=data["content"], time=data.get("time"))
+            except (ValueError, json.JSONDecodeError, KeyError):
+                pass
+
+        # Fallback: a11y tree heuristic parsing
         thinking_content = []
         thinking_time = None
         in_thinking = False
@@ -1064,15 +1367,24 @@ class MultiRoundChat:
     # --- Setup ---
 
     def setup(self) -> bool:
-        """Initialize the chat session (navigate, set mode, toggles)."""
+        """Initialize the chat session (navigate, set mode, toggles).
+
+        Only navigates to the landing page if we're not already on
+        a DeepSeek chat page. This preserves active conversations
+        for multi-round continuity.
+        """
         if self._is_setup:
             return True
 
-        self.chat.goto("/")
-        self.chat.wait_for_page_ready(timeout=10)
+        url = self.chat.get_current_url()
+        is_on_deepseek = "chat.deepseek.com" in url
 
-        if self.chat.is_front_page():
-            self.chat.select_mode(self.mode)
+        if not is_on_deepseek:
+            self.chat.goto("/")
+            self.chat.wait_for_page_ready(timeout=10)
+
+            if self.chat.is_front_page():
+                self.chat.select_mode(self.mode)
 
         # Apply toggle settings
         state = self.chat.semantics.get_page_state()
@@ -1101,6 +1413,9 @@ class MultiRoundChat:
     ) -> Optional[ChatTurn]:
         """Send a message and wait for the complete response.
 
+        Blocks until the model finishes streaming and the page is ready
+        for the next turn.
+
         Args:
             message: User message text
             timeout: Maximum seconds to wait for response
@@ -1114,17 +1429,22 @@ class MultiRoundChat:
         if not self._is_setup:
             self.setup()
 
+        # Step 1: Wait until previous response is fully done and input is ready.
+        if not self._wait_until_ready(timeout=30):
+            return None
+
+        # Step 2: Send the message.
         if not self.chat.send_message(message):
             return None
 
-        # Detect streaming start
+        # Step 3: Wait for streaming to start (model picked up the message).
         if on_stream_start:
-            stream_detected = self._wait_for_streaming(timeout=5)
+            stream_detected = self._wait_for_streaming(timeout=10)
             if stream_detected:
                 on_stream_start()
 
-        # Wait for complete response
-        response = self.chat.wait_for_response(timeout=timeout)
+        # Step 4: Wait for streaming to finish and capture response.
+        response = self._wait_for_complete_response(timeout=timeout)
 
         if response is None:
             return None
@@ -1143,6 +1463,57 @@ class MultiRoundChat:
             on_response(response)
 
         return turn
+
+    def _wait_until_ready(self, timeout: float = 30) -> bool:
+        """Wait until the page is ready for a new message.
+
+        Ensures previous response streaming is done and the input field
+        is available. Critical for multi-round continuity.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            state = self.chat.semantics.get_page_state()
+            if not state.is_streaming and state.has_input:
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _wait_for_complete_response(self, timeout: float = 120) -> Optional[str]:
+        """Wait until streaming starts, then finishes, and return response.
+
+        More reliable than message-count comparison because it uses the
+        page's streaming state directly.
+        """
+        deadline = time.time() + timeout
+
+        # Phase 1: Wait for streaming to start (model picked up the message)
+        streaming_started = False
+        while time.time() < deadline:
+            state = self.chat.semantics.get_page_state()
+            if state.is_streaming:
+                streaming_started = True
+                break
+            time.sleep(0.3)
+
+        if not streaming_started:
+            # Model may have responded instantly; capture what we have
+            msgs = self.chat.get_messages()
+            if msgs and msgs[-1].role == "assistant":
+                return msgs[-1].content
+            return None
+
+        # Phase 2: Wait for streaming to finish
+        while time.time() < deadline:
+            state = self.chat.semantics.get_page_state()
+            if not state.is_streaming:
+                # Give DOM one more moment to settle
+                time.sleep(0.5)
+                msgs = self.chat.get_messages()
+                if msgs and msgs[-1].role == "assistant":
+                    return msgs[-1].content
+            time.sleep(0.5)
+
+        return None
 
     def _wait_for_streaming(self, timeout: float = 5) -> bool:
         """Quick poll to detect if model started streaming."""
@@ -1170,6 +1541,10 @@ class MultiRoundChat:
         """
         if not self._is_setup:
             self.setup()
+
+        # Wait until previous response is fully done and input is ready.
+        if not self._wait_until_ready(timeout=30):
+            return None
 
         if not self.chat.send_message(message):
             return None
