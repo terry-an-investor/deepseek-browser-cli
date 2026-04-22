@@ -8,6 +8,11 @@ send succeeds and produces a non-empty response.
 """
 
 import time
+
+import os
+import shutil
+
+import pytest
 from deepseek_browser_cli.agent_bridge import DeepSeekAgentBridge
 
 PROMPTS = [
@@ -34,7 +39,13 @@ PROMPTS = [
 ]
 
 
-def main():
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_DEEPSEEK_E2E") != "1" or shutil.which("agent-browser") is None,
+    reason="Requires RUN_DEEPSEEK_E2E=1 and agent-browser on PATH.",
+)
+
+
+def test_multiround_bridge():
     bridge = DeepSeekAgentBridge(session="multiround-test", auto_connect=True)
 
     # Start fresh
@@ -118,7 +129,8 @@ def main():
         print("\nAll 20 rounds completed successfully!")
     else:
         print(f"\nTest completed with {len(issues)} issue(s).")
+    assert not issues, "\n".join(issues)
 
 
 if __name__ == "__main__":
-    main()
+    test_multiround_bridge()

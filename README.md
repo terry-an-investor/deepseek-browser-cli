@@ -19,6 +19,7 @@ Designed to be used as an **MCP server**, **AI skill**, or **programmatic API**.
 │  MCP Server (deepseek-mcp)              │  ← stdio transport for Claude, etc.
 │  - deepseek_chat, deepseek_observe      │
 │  - deepseek_toggle, deepseek_mode       │
+│  - deepseek_new_chat                    │
 ├─────────────────────────────────────────┤
 │  Agent Bridge                           │  ← AI agent integration
 │  - observe() -> JSON state              │    (discover, decide, act)
@@ -53,10 +54,24 @@ Requires Python 3.11+, [uv](https://github.com/astral-sh/uv), and [agent-browser
 # 1. Install agent-browser (provides CDP CLI)
 npm install -g agent-browser
 
-# 2. Clone and install
-uv pip install -e .
-# or
+# 2. Clone and install project dependencies
 uv sync
+
+# 3. Install dev dependencies when running tests
+uv sync --group dev
+```
+
+## Testing
+
+The shipped tests are live browser integration tests. They require `agent-browser`,
+an authenticated DeepSeek session, and explicit opt-in.
+
+```bash
+# Safe default: confirms pytest is available and skips live browser tests
+uv run pytest -q
+
+# Run the live integration suite
+RUN_DEEPSEEK_E2E=1 uv run pytest -q
 ```
 
 ---

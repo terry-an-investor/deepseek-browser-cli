@@ -3,11 +3,21 @@
 
 import asyncio
 import json
+import os
+import shutil
 
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_DEEPSEEK_E2E") != "1" or shutil.which("agent-browser") is None,
+    reason="Requires RUN_DEEPSEEK_E2E=1 and agent-browser on PATH.",
+)
+
+
+@pytest.mark.asyncio
 async def test_mcp_server():
     server_params = StdioServerParameters(
         command="uv",
@@ -21,8 +31,15 @@ async def test_mcp_server():
 
             # List tools
             tools = await session.list_tools()
-            print(f"Tools: {[t.name for t in tools.tools]}")
-            assert len(tools.tools) == 4, f"Expected 4 tools, got {len(tools.tools)}"
+            tool_names = {tool.name for tool in tools.tools}
+            print(f"Tools: {sorted(tool_names)}")
+            assert tool_names == {
+                "deepseek_chat",
+                "deepseek_mode",
+                "deepseek_new_chat",
+                "deepseek_observe",
+                "deepseek_toggle",
+            }
 
             # Test observe
             print("\n--- Testing deepseek_observe ---")
@@ -39,6 +56,7 @@ async def test_mcp_server():
             )
             data = json.loads(result.content[0].text)
             print(f"Success: {data['success']}")
+            assert data["success"] is True, data
             print(f"Response: {data['response'][:80]}...")
 
             # Test chat - round 2 (same conversation)
@@ -48,6 +66,7 @@ async def test_mcp_server():
             )
             data = json.loads(result.content[0].text)
             print(f"Success: {data['success']}")
+            assert data["success"] is True, data
             print(f"Response: {data['response'][:80]}...")
 
             # Test chat - round 3
@@ -57,6 +76,7 @@ async def test_mcp_server():
             )
             data = json.loads(result.content[0].text)
             print(f"Success: {data['success']}")
+            assert data["success"] is True, data
             print(f"Response: {data['response'][:80]}...")
 
             # Test toggle
@@ -66,6 +86,7 @@ async def test_mcp_server():
             )
             data = json.loads(result.content[0].text)
             print(f"Success: {data['success']}")
+            assert data["success"] is True, data
             print(f"Deep thinking: {data.get('deep_thinking_enabled')}")
 
             # Test new chat
@@ -73,6 +94,7 @@ async def test_mcp_server():
             result = await session.call_tool("deepseek_new_chat", arguments={})
             data = json.loads(result.content[0].text)
             print(f"Success: {data['success']}")
+            assert data["success"] is True, data
 
             # Observe after new chat
             print("\n--- Observing after new chat ---")

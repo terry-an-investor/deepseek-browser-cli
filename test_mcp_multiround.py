@@ -3,8 +3,11 @@
 
 import asyncio
 import json
+import os
+import shutil
 import time
 
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -32,7 +35,14 @@ PROMPTS = [
 ]
 
 
-async def test():
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_DEEPSEEK_E2E") != "1" or shutil.which("agent-browser") is None,
+    reason="Requires RUN_DEEPSEEK_E2E=1 and agent-browser on PATH.",
+)
+
+
+@pytest.mark.asyncio
+async def test_mcp_multiround():
     server_params = StdioServerParameters(
         command="uv",
         args=["run", "python", "-m", "deepseek_browser_cli.mcp_server"],
@@ -86,7 +96,8 @@ async def test():
                 print("\nAll 20 rounds passed via MCP!")
             else:
                 print(f"\nCompleted with {len(issues)} issue(s).")
+            assert not issues, "\n".join(issues)
 
 
 if __name__ == "__main__":
-    asyncio.run(test())
+    asyncio.run(test_mcp_multiround())
