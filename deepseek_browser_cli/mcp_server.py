@@ -30,10 +30,10 @@ from deepseek_browser_cli.agent_bridge import DeepSeekAgentBridge
 # Lifespan: one browser session for the whole MCP server lifetime
 # ---------------------------------------------------------------------------
 
-DEFAULT_CDP_PORT = int(os.environ.get("DEEPSEEK_CDP_PORT", "9222"))
+DEFAULT_CDP_PORT = int(os.environ.get("DEEPSEEK_CDP_PORT", "9333"))
 DEFAULT_CHROME_PATH = os.environ.get(
     "DEEPSEEK_CHROME_PATH",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome.app",
 )
 DEFAULT_USER_DATA_DIR = Path(
     os.environ.get(
@@ -127,22 +127,32 @@ def _is_cdp_ready(port: int) -> bool:
 
 def _launch_chrome_with_debugging(port: int, chrome_path: str, user_data_dir: Path) -> None:
     """Launch Chrome with remote debugging and a persistent profile directory."""
-    chrome_binary = Path(chrome_path).expanduser()
-    if not chrome_binary.exists():
+    chrome_target = Path(chrome_path).expanduser()
+    if not chrome_target.exists():
         raise FileNotFoundError(
-            f"Chrome executable not found: {chrome_binary}. "
-            "Set DEEPSEEK_CHROME_PATH to your Chrome binary path."
+            f"Chrome target not found: {chrome_target}. "
+            "Set DEEPSEEK_CHROME_PATH to a Chrome .app bundle or binary path."
         )
 
     user_data_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        str(chrome_binary),
+    chrome_args = [
         f"--remote-debugging-port={port}",
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
         "https://chat.deepseek.com",
     ]
+    if chrome_target.suffix == ".app":
+        # macOS: launch a dedicated app instance so daily Chrome can run in parallel.
+        cmd = [
+            "open",
+            "-na",
+            str(chrome_target),
+            "--args",
+            *chrome_args,
+        ]
+    else:
+        cmd = [str(chrome_target), *chrome_args]
     subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,

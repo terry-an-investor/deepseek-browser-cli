@@ -39,10 +39,11 @@ uv sync --group dev
 
 If MCP cannot connect, this is usually the blocker.
 
-Chrome remote debugging requires a non-default user-data-dir. The server now auto-launches Chrome with a persistent profile by default, so login persists:
+Chrome remote debugging requires a non-default user-data-dir. The server now auto-launches a dedicated Chrome instance with a persistent profile by default, so login persists and your daily Chrome can run in parallel:
 
-- Default CDP port: `9222`
+- Default CDP port: `9333`
 - Default persistent profile: `~/.deepseek-mcp-chrome`
+- Default Chrome target: `/Applications/Google Chrome.app` (launched with `open -na` + CDP args)
 
 First run flow:
 
@@ -56,6 +57,20 @@ Optional environment overrides:
 - `DEEPSEEK_CDP_PORT`
 - `DEEPSEEK_CHROME_PATH`
 - `DEEPSEEK_CHROME_USER_DATA_DIR`
+
+### Parallel Daily Chrome Tip
+
+MCP and your daily Chrome can run at the same time. MCP uses its own debug profile/port by default.
+
+If you launch manually, use this pattern:
+
+```bash
+open -na "/Applications/Google Chrome.app" --args \
+  --remote-debugging-port=9333 \
+  --user-data-dir="$HOME/.deepseek-mcp-chrome"
+
+DEEPSEEK_CDP_PORT=9333 uv run deepseek-mcp
+```
 
 ## Testing
 
@@ -121,7 +136,8 @@ uv run python -m deepseek_browser_cli.mcp_server
 ### Current MCP behavior
 
 - Auto-ensures Chrome CDP is available.
-- Auto-launches Chrome with persistent profile (`~/.deepseek-mcp-chrome`) if needed.
+- Auto-launches a dedicated Chrome instance with persistent profile (`~/.deepseek-mcp-chrome`) if needed.
+- Uses default CDP port `9333` to avoid common clashes with personal browser/debug workflows.
 - Uses low-latency chat polling (default `poll_interval=0.25`) for faster response completion.
 - Emits incremental progress/log messages during streaming for clients that surface MCP logs.
 
