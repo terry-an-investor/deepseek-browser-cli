@@ -14,8 +14,10 @@ import asyncio
 import ast
 import json
 import os
+import shutil
 import socket
 import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,11 +32,32 @@ from deepseek_browser_cli.agent_bridge import DeepSeekAgentBridge
 # Lifespan: one browser session for the whole MCP server lifetime
 # ---------------------------------------------------------------------------
 
+def _default_chrome_path() -> str:
+    """Return a platform-appropriate Chrome path or executable."""
+    if sys.platform == "darwin":
+        return "/Applications/Google Chrome.app"
+    if sys.platform.startswith("linux"):
+        for binary in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
+            path = shutil.which(binary)
+            if path:
+                return path
+        return "google-chrome"
+    if sys.platform.startswith("win"):
+        candidates = []
+        for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(env)
+            if not base:
+                continue
+            candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return "chrome.exe"
+    return "google-chrome"
+
+
 DEFAULT_CDP_PORT = int(os.environ.get("DEEPSEEK_CDP_PORT", "9333"))
-DEFAULT_CHROME_PATH = os.environ.get(
-    "DEEPSEEK_CHROME_PATH",
-    "/Applications/Google Chrome.app",
-)
+DEFAULT_CHROME_PATH = os.environ.get("DEEPSEEK_CHROME_PATH", _default_chrome_path())
 DEFAULT_USER_DATA_DIR = Path(
     os.environ.get(
         "DEEPSEEK_CHROME_USER_DATA_DIR",
@@ -75,10 +98,13 @@ DEFAULT_MODE_TOGGLES = {
 }
 
 
-def _apply_mode_default_toggles(bridge: DeepSeekAgentBridge, mode: Optional[str] = None) -> dict[str, Any]:
+def _apply_mode_default_toggles(
+    bridge: DeepSeekAgentBridge,
+    mode: Optional[str] = None,
+    observed_page_state: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """Apply configured default toggles for the active mode."""
-    obs = bridge.observe()
-    state = obs.get("page_state", {})
+    state = observed_page_state or bridge.observe().get("page_state", {})
     canonical = _canonical_mode(mode) or _canonical_mode(state.get("mode"))
     if canonical not in DEFAULT_MODE_TOGGLES or not state.get("has_input"):
         return {
@@ -128,7 +154,8 @@ def _is_cdp_ready(port: int) -> bool:
 def _launch_chrome_with_debugging(port: int, chrome_path: str, user_data_dir: Path) -> None:
     """Launch Chrome with remote debugging and a persistent profile directory."""
     chrome_target = Path(chrome_path).expanduser()
-    if not chrome_target.exists():
+    resolved_binary = shutil.which(chrome_path)
+    if not chrome_target.exists() and not resolved_binary:
         raise FileNotFoundError(
             f"Chrome target not found: {chrome_target}. "
             "Set DEEPSEEK_CHROME_PATH to a Chrome .app bundle or binary path."
@@ -152,7 +179,8 @@ def _launch_chrome_with_debugging(port: int, chrome_path: str, user_data_dir: Pa
             *chrome_args,
         ]
     else:
-        cmd = [str(chrome_target), *chrome_args]
+        executable = str(chrome_target if chrome_target.exists() else resolved_binary)
+        cmd = [executable, *chrome_args]
     subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -272,11 +300,10 @@ def _observe_chat_fast(bridge: DeepSeekAgentBridge) -> Optional[dict[str, Any]]:
         const textarea = document.querySelector('textarea');
         out.has_input = !!textarea;
 
-        const bodyText = document.body ? (document.body.innerText || '') : '';
         const spinner = document.querySelector(
             '.ds-loading, [class*="loading"], [class*="spinner"], [aria-busy="true"]'
         );
-        out.is_streaming = !!spinner || /正在思考|generating|thinking/i.test(bodyText);
+        out.is_streaming = !!spinner;
         out.can_send = out.has_input && !out.is_streaming;
 
         const messageNodes = Array.from(document.querySelectorAll('.ds-message'));
@@ -285,7 +312,8 @@ def _observe_chat_fast(bridge: DeepSeekAgentBridge) -> Optional[dict[str, Any]]:
         let lastAssistant = null;
         for (let i = messageNodes.length - 1; i >= 0; i--) {
             const classes = (messageNodes[i].className || '').split(/\s+/).filter(Boolean);
-            if (classes[0] === 'ds-message') {
+            const hasHashClass = classes.some(c => /^d[0-9a-f]{7,}$/i.test(c));
+            if (classes.includes('ds-message') && !hasHashClass) {
                 out.assistant_count += 1;
                 if (!lastAssistant) {
                     lastAssistant = messageNodes[i];
@@ -415,7 +443,6 @@ async def deepseek_chat(
     # 3. Wait for response with low-latency loop.
     deadline = time.monotonic() + timeout
     response_started = False
-    idle_since = time.monotonic()
     last_streamed = ""
 
     while time.monotonic() < deadline:
@@ -427,7 +454,6 @@ async def deepseek_chat(
         has_new = _has_new_response_fast(baseline, obs)
         if has_new:
             response_started = True
-            idle_since = time.monotonic()
             current = obs.get("last_response", {}).get("content", "")
             if current and len(current) > len(last_streamed):
                 delta = current[len(last_streamed) :]
@@ -441,15 +467,6 @@ async def deepseek_chat(
             settled = _observe_chat_fast(bridge)
             if settled and settled.get("can_send") and _has_new_response_fast(baseline, settled):
                 return _chat_result_from_obs(settled)
-
-        # DeepSeek sometimes stalls; nudge if nothing changes for 10s after streaming started.
-        if (
-            response_started
-            and not obs.get("is_streaming")
-            and (time.monotonic() - idle_since) >= 10
-        ):
-            bridge.act({"type": "press", "params": {"key": "Enter"}})
-            idle_since = time.monotonic()
 
         await asyncio.sleep(poll_interval)
 
@@ -548,7 +565,12 @@ async def deepseek_mode(mode: str, ctx: Context) -> str:
 
     result = bridge.act({"type": "mode", "params": {"mode": canonical}})
     await asyncio.sleep(0.5)  # Let DOM update after mode switch
-    defaults = _apply_mode_default_toggles(bridge, canonical)
+    state_after_mode = bridge.observe().get("page_state", {})
+    defaults = _apply_mode_default_toggles(
+        bridge,
+        canonical,
+        observed_page_state=state_after_mode,
+    )
     return json.dumps(
         {
             "success": result.get("success", False),
@@ -572,7 +594,11 @@ async def deepseek_new_chat(ctx: Context) -> str:
     bridge = _get_bridge(ctx)
     obs = bridge.observe()
     if obs["page_state"]["is_initial_page"]:
-        defaults = _apply_mode_default_toggles(bridge, obs["page_state"].get("mode"))
+        defaults = _apply_mode_default_toggles(
+            bridge,
+            obs["page_state"].get("mode"),
+            observed_page_state=obs.get("page_state", {}),
+        )
         return json.dumps(
             {
                 "success": True,
@@ -598,7 +624,11 @@ async def deepseek_new_chat(ctx: Context) -> str:
             break
 
     obs = bridge.observe()
-    defaults = _apply_mode_default_toggles(bridge, obs.get("page_state", {}).get("mode"))
+    defaults = _apply_mode_default_toggles(
+        bridge,
+        obs.get("page_state", {}).get("mode"),
+        observed_page_state=obs.get("page_state", {}),
+    )
     return json.dumps(
         {
             "success": result.get("success", False) and obs.get("page_state", {}).get("is_initial_page", False),

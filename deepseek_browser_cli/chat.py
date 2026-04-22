@@ -1,6 +1,7 @@
 """Layer 3: High-level conversational interface and multi-round manager."""
 
 import json
+import re
 import time
 from typing import Optional
 
@@ -126,7 +127,10 @@ class DeepSeekChat:
             if current_count > self._last_message_count:
                 self._last_message_count = current_count
                 msgs = self.get_messages()
-                return msgs[-1].content if msgs else None
+                for msg in reversed(msgs):
+                    if msg.role == "assistant":
+                        return msg.content
+                return None
 
             # If streaming, wait longer without counting against timeout as aggressively
             if state["is_streaming"]:
@@ -515,16 +519,30 @@ class MultiRoundChat:
 
     # --- Export ---
 
+    @staticmethod
+    def _escape_markdown_inline(text: str) -> str:
+        escaped = text.replace("\\", "\\\\")
+        for ch in ("`", "*", "_", "{", "}", "[", "]", "(", ")", "#", "+", "-", "!", "|", ">"):
+            escaped = escaped.replace(ch, f"\\{ch}")
+        return escaped
+
+    @staticmethod
+    def _fenced_block(text: str) -> str:
+        max_backticks = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+        fence = "`" * max(3, max_backticks + 1)
+        return f"{fence}\n{text}\n{fence}"
+
     def export_markdown(self) -> str:
         """Export conversation as Markdown."""
         lines = []
         for i, turn in enumerate(self.history, 1):
             lines.append(f"## Turn {i}")
-            lines.append(f"\n**User:** {turn.user_message}\n")
+            lines.append(f"\n**User:** {self._escape_markdown_inline(turn.user_message)}\n")
             if turn.thinking_trace:
-                lines.append(f"\n*Thinking ({turn.thinking_trace.time}):*")
-                lines.append(f"```\n{turn.thinking_trace.content}\n```\n")
-            lines.append(f"\n**Assistant:** {turn.assistant_response}\n")
+                trace_time = turn.thinking_trace.time or "unknown"
+                lines.append(f"\n*Thinking ({self._escape_markdown_inline(trace_time)}):*")
+                lines.append(f"{self._fenced_block(turn.thinking_trace.content)}\n")
+            lines.append(f"\n**Assistant:** {self._escape_markdown_inline(turn.assistant_response)}\n")
         return "\n".join(lines)
 
     def export_json(self) -> str:
@@ -578,4 +596,3 @@ if __name__ == "__main__":
     for m in msgs[-3:]:
         preview = m.content[:60] + "..." if len(m.content) > 60 else m.content
         print(f"  [{m.role}]: {preview}")
-

@@ -2,10 +2,20 @@
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
-import os
 import time
+
+from deepseek_browser_cli.primitives import _clean_env
+
+
+def _ensure_agent_browser_available() -> None:
+    if shutil.which("agent-browser") is None:
+        raise RuntimeError(
+            "agent-browser was not found on PATH. "
+            "Install it with: npm install -g agent-browser"
+        )
 
 
 def _find_textbox_selector(session, auto_connect=False):
@@ -102,9 +112,8 @@ def interactive_session(session, auto_connect=False, mode="expert", thinking=Tru
     - /search on|off to toggle web search
     - /quit to exit
     """
-    from deepseek_browser_cli.deepseek_model import (
-        MultiRoundChat, ChatMode, ChatTurn
-    )
+    from deepseek_browser_cli.chat import MultiRoundChat
+    from deepseek_browser_cli.models import ChatMode
 
     chat_mode = ChatMode.EXPERT if mode == "expert" else ChatMode.QUICK
     chat = MultiRoundChat(
@@ -312,12 +321,12 @@ def interactive_session(session, auto_connect=False, mode="expert", thinking=Tru
             print("[Failed to get response]")
 
 
-def _clean_env():
-    """Return environment without proxy variables."""
-    return {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}
-
-
 def main(argv=None):
+    try:
+        _ensure_agent_browser_available()
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(prog="deepseek-browser")
     parser.add_argument("--session", "-s", default="default", help="Session name")
     parser.add_argument("--headed", action="store_true", help="Show browser window")

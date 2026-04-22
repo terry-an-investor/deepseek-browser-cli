@@ -105,11 +105,6 @@ class DeepSeekObserver:
                 if m:
                     result["web_search_toggle_ref"] = m.group(1)
 
-            # Send button (last button before the disabled one, or the only non-disabled)
-            if "button [disabled" in line and "ref=" in line:
-                # The send button is the disabled one when empty, or the one before it
-                pass
-
         # Use JS for more reliable discovery of dynamic elements and toggle states
         js = r"""
         (function() {
@@ -226,7 +221,8 @@ class DeepSeekObserver:
             let lastAssistant = null;
             for (let i = msgElements.length - 1; i >= 0; i--) {
                 const classes = (msgElements[i].className || '').split(/\s+/).filter(Boolean);
-                if (classes[0] === 'ds-message') {
+                const hasHashClass = classes.some(c => /^d[0-9a-f]{7,}$/i.test(c));
+                if (classes.includes('ds-message') && !hasHashClass) {
                     lastAssistant = msgElements[i];
                     break;
                 }
@@ -293,7 +289,8 @@ class DeepSeekObserver:
             let lastMsg = null;
             for (let i = msgElements.length - 1; i >= 0; i--) {
                 const classes = (msgElements[i].className || '').split(/\s+/).filter(Boolean);
-                if (classes[0] === 'ds-message') {
+                const hasHashClass = classes.some(c => /^d[0-9a-f]{7,}$/i.test(c));
+                if (classes.includes('ds-message') && !hasHashClass) {
                     lastMsg = msgElements[i];
                     break;
                 }
@@ -761,6 +758,10 @@ class DeepSeekAgentBridge:
         if (
             current["thinking_content"]
             and current["thinking_content"] != baseline["thinking_content"]
+        ):
+            return True
+        if (
+            current["thinking_time"]
             and current["thinking_time"] != baseline["thinking_time"]
         ):
             return True

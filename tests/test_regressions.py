@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Regression tests for non-network behavior."""
 
+import pytest
+
 from deepseek_browser_cli.agent_bridge import DeepSeekAgentBridge
 from deepseek_browser_cli.deepseek_model import (
     DeepSeekChat,
@@ -8,6 +10,8 @@ from deepseek_browser_cli.deepseek_model import (
     Message,
     MultiRoundChat,
 )
+from deepseek_browser_cli.models import ChatTurn, ThinkingTrace
+from deepseek_browser_cli.primitives import A11yPrimitives, _run
 
 
 class FakeA11y:
@@ -206,3 +210,101 @@ def test_has_new_response_accepts_changed_last_response_on_virtualized_dom():
     }
 
     assert DeepSeekAgentBridge._has_new_response(baseline, observation) is True
+
+
+def test_has_new_response_accepts_thinking_content_change_with_same_time():
+    baseline = {
+        "message_count": 3,
+        "assistant_count": 2,
+        "last_response_content": "unchanged",
+        "thinking_content": "old thinking",
+        "thinking_time": "4 秒",
+    }
+    observation = {
+        "page_state": {"message_count": 3},
+        "messages": [
+            {"role": "assistant", "content": "unchanged"},
+        ],
+        "last_response": {
+            "content": "unchanged",
+            "thinking": {
+                "content": "new thinking",
+                "time": "4 秒",
+            },
+        },
+    }
+
+    assert DeepSeekAgentBridge._has_new_response(baseline, observation) is True
+
+
+def test_wait_for_response_returns_last_assistant_message():
+    chat = object.__new__(DeepSeekChat)
+
+    class StubSemantics:
+        def __init__(self):
+            self._msg_count = 1
+
+        def get_fast_state(self):
+            return {"message_count": self._msg_count, "is_streaming": False}
+
+        def get_messages(self):
+            if self._msg_count == 1:
+                return [Message(role="user", content="hello")]
+            return [
+                Message(role="user", content="hello"),
+                Message(role="assistant", content="expected assistant response"),
+                Message(role="user", content="out-of-order user"),
+            ]
+
+    stub = StubSemantics()
+    chat.semantics = stub
+
+    import threading
+    import time
+
+    def delayed_bump():
+        time.sleep(0.06)
+        stub._msg_count = 2
+
+    t = threading.Thread(target=delayed_bump)
+    t.start()
+    result = chat.wait_for_response(timeout=0.5, poll_interval=0.05)
+    t.join()
+    assert result == "expected assistant response"
+
+
+def test_parse_line_exposes_state_attributes():
+    a11y = A11yPrimitives(session="regression-parse-line")
+    parsed = a11y._parse_line('- button "深度思考" [pressed] [ref=t1]')
+    assert parsed is not None
+    assert parsed["ref"] == "t1"
+    assert parsed["attrs"]["pressed"] is True
+    assert parsed["attrs"]["ref"] == "t1"
+
+
+def test_run_reports_agent_browser_missing(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("agent-browser")
+
+    monkeypatch.setattr("deepseek_browser_cli.primitives.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="agent-browser was not found on PATH"):
+        _run(["agent-browser", "snapshot"])
+
+
+def test_export_markdown_escapes_special_characters():
+    chat = object.__new__(MultiRoundChat)
+    chat.history = [
+        ChatTurn(
+            user_message="User with # heading and *stars*",
+            assistant_response="Assistant with [link](x) and ```code```",
+            thinking_trace=ThinkingTrace(content="a```b", time="2 秒"),
+        )
+    ]
+
+    exported = chat.export_markdown()
+
+    assert "\\# heading" in exported
+    assert "\\*stars\\*" in exported
+    assert "\\[link\\]\\(x\\)" in exported
+    assert "````" in exported

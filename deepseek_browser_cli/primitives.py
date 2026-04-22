@@ -26,7 +26,13 @@ def _clean_env():
 
 def _run(cmd, check=False):
     """Run a command through agent-browser."""
-    result = subprocess.run(cmd, capture_output=True, text=True, env=_clean_env())
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, env=_clean_env())
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "agent-browser was not found on PATH. "
+            "Install it with: npm install -g agent-browser"
+        ) from exc
     if check and result.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\nstderr: {result.stderr.strip()}")
     return result.stdout, result.returncode
@@ -125,14 +131,28 @@ class A11yPrimitives:
 
     def _parse_line(self, line: str) -> Optional[dict]:
         """Parse a snapshot line like:  - heading "Hello" [ref=abc123]"""
-        # Role + text pattern:  - role "text" [ref=...]
-        m = re.match(r'^\s*-\s+(\w+)\s+"([^"]*)"(?:\s+\[ref=([^\]]+)\])?', line)
+        # Role + optional text pattern:  - role "text" [ref=...]
+        m = re.match(r'^\s*-\s+(\w+)(?:\s+"([^"]*)")?(?:\s+\[ref=([^\]]+)\])?', line)
         if not m:
             return None
+        attrs: dict[str, str | bool] = {}
+        for raw in re.findall(r"\[([^\]]+)\]", line):
+            for chunk in (part.strip() for part in raw.split(",")):
+                if not chunk:
+                    continue
+                if "=" in chunk:
+                    key, value = chunk.split("=", 1)
+                    attrs[key.strip()] = value.strip()
+                else:
+                    attrs[chunk] = True
+        ref = m.group(3)
+        if not ref and isinstance(attrs.get("ref"), str):
+            ref = attrs["ref"]
         return {
             "role": m.group(1),
-            "text": m.group(2),
-            "ref": m.group(3),
+            "text": m.group(2) or "",
+            "ref": ref,
+            "attrs": attrs,
             "raw": line,
         }
 

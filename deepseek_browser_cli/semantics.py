@@ -81,11 +81,10 @@ class DeepSeekSemantics:
         (function() {
             const textarea = document.querySelector('textarea');
             const hasInput = !!textarea;
-            const bodyText = document.body ? (document.body.innerText || '') : '';
             const spinner = document.querySelector(
                 '.ds-loading, [class*="loading"], [class*="spinner"], [aria-busy="true"]'
             );
-            const isStreaming = !!spinner || /正在思考|generating|thinking/i.test(bodyText);
+            const isStreaming = !!spinner;
             const msgCount = document.querySelectorAll('.ds-message').length;
             return JSON.stringify({has_input: hasInput, is_streaming: isStreaming, message_count: msgCount});
         })()
@@ -129,13 +128,11 @@ class DeepSeekSemantics:
             // Has input field
             info.has_input = !!textarea;
 
-            // Streaming: look for busy regions, loading indicators, or visible generation text.
-            const bodyText = document.body ? (document.body.innerText || '') : '';
+            // Streaming: rely on explicit busy/loading markers in active DOM.
             const spinner = document.querySelector(
                 '.ds-loading, [class*="loading"], [class*="spinner"], [aria-busy="true"]'
             );
-            const streamingText = /正在思考|generating|thinking/i.test(bodyText);
-            info.is_streaming = !!spinner || streamingText;
+            info.is_streaming = !!spinner;
 
             // Toggle states via CSS class (language-agnostic)
             const allBtns = document.querySelectorAll('button, [role="button"]');
@@ -223,7 +220,7 @@ class DeepSeekSemantics:
                 for label in ('radio "快速模式"', 'radio "Instant"', 'radio "专家模式"', 'radio "Expert"')
             )
             is_initial = has_input and len(msgs) == 0 and has_mode_selector
-        is_streaming = dom_info.get("is_streaming", False) or ("正在思考" in snap or "generating" in snap.lower())
+        is_streaming = dom_info.get("is_streaming", False)
         deep_thinking = dom_info.get("deep_thinking", False)
         if not deep_thinking:
             deep_thinking = self._infer_toggle_state_from_snapshot(snap, ("深度思考", "DeepThink"))
@@ -270,11 +267,15 @@ class DeepSeekSemantics:
     def _infer_toggle_state_from_snapshot(self, snapshot: str, labels: tuple[str, ...]) -> bool:
         """Infer whether a toggle is active from a11y snapshot metadata."""
         label_patterns = tuple(f'button "{label}"' for label in labels)
+        found_match = False
+        found_active = False
         for line in snapshot.split("\n"):
             if any(pattern in line for pattern in label_patterns):
+                found_match = True
                 lowered = line.lower()
-                return any(token in lowered for token in self.ACTIVE_A11Y_TOKENS)
-        return False
+                if any(token in lowered for token in self.ACTIVE_A11Y_TOKENS):
+                    found_active = True
+        return found_match and found_active
 
     # --- Session / Sidebar management ---
 
@@ -398,7 +399,6 @@ class DeepSeekSemantics:
 
         for label in labels:
             if self._try_click_radio(label):
-                import time
                 time.sleep(0.5)
                 return True
 
@@ -421,7 +421,6 @@ class DeepSeekSemantics:
         """
         result, code = self.a11y.eval_js(js)
         if code == 0 and "clicked" in result:
-            import time
             time.sleep(0.5)
             return True
 
@@ -451,14 +450,14 @@ class DeepSeekSemantics:
     const modeDivs = document.querySelectorAll('[class*="_"]');
     for (const div of modeDivs) {
         const parent = div.parentElement;
-        if (parent && parent.textContent.includes(%s)) {
+        if (parent && parent.textContent.includes(__LABEL__)) {
             div.click();
             return 'clicked';
         }
     }
     return 'not found';
 })()
-""" % json.dumps(label)
+""".replace("__LABEL__", json.dumps(label))
         result, code = self.a11y.eval_js(js)
         return code == 0 and "not found" not in result
 
@@ -469,7 +468,7 @@ class DeepSeekSemantics:
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
     let node;
     while (node = walker.nextNode()) {
-        if (node.textContent.trim() === %s) {
+        if (node.textContent.trim() === __LABEL__) {
             const clickable = node.closest('label, button, div[role="radio"]') || node;
             clickable.click();
             return 'clicked';
@@ -477,7 +476,7 @@ class DeepSeekSemantics:
     }
     return 'not found';
 })()
-""" % json.dumps(label)
+""".replace("__LABEL__", json.dumps(label))
         result, code = self.a11y.eval_js(js)
         return code == 0 and "not found" not in result
 
@@ -598,37 +597,29 @@ class DeepSeekSemantics:
         snap = self.a11y.snapshot()
         lines = snap.split("\n")
 
-        # Find the last group of buttons that appears after assistant content.
-        # Buttons in the same group share the same indentation level and are
-        # siblings (they may have image children on subsequent lines).
-        button_groups = []
-        current_group = []
-        current_indent = None
-
-        for line in lines:
-            m = re.match(r'^(\s+)-\s+button\s+\[ref=([^\]]+)\]', line)
-            if m:
-                indent = len(m.group(1))
-                ref = m.group(2)
-                if current_indent is not None and indent == current_indent:
-                    # Same group (sibling button)
-                    current_group.append(ref)
-                else:
-                    # New group
-                    if len(current_group) >= 3:
-                        button_groups.append(current_group)
-                    current_group = [ref]
-                    current_indent = indent
-            else:
-                indent_match = re.match(r'^(\s+)-', line)
-                if not current_group or current_indent is None or not indent_match:
+        # Group button refs by proximity instead of indentation to avoid
+        # hierarchy-dependent parsing breakage.
+        button_groups: list[list[str]] = []
+        current_group: list[str] = []
+        last_btn_idx = -99
+        for idx, line in enumerate(lines):
+            m = re.search(r'-\s+button(?:\s+"[^"]*")?.*\[ref=([^\]]+)\]', line)
+            if not m:
+                if current_group and re.search(r"-\s+image\b", line):
                     continue
-                indent = len(indent_match.group(1))
-                if indent <= current_indent:
+                if current_group:
                     if len(current_group) >= 3:
                         button_groups.append(current_group)
                     current_group = []
-                    current_indent = None
+                continue
+
+            ref = m.group(1)
+            if current_group and (idx - last_btn_idx) > 2:
+                if len(current_group) >= 3:
+                    button_groups.append(current_group)
+                current_group = []
+            current_group.append(ref)
+            last_btn_idx = idx
 
         if len(current_group) >= 3:
             button_groups.append(current_group)
@@ -811,7 +802,6 @@ class DeepSeekSemantics:
         """
         self.a11y.eval_js(js)
         # Wait a bit for the virtual list to render items
-        import time
         time.sleep(0.5)
 
         # Check if we need to wait for more messages to load
@@ -852,9 +842,10 @@ class DeepSeekSemantics:
                 if (!text || text.length < 2) return;
 
                 // Distinguish user vs assistant by extra wrapper classes.
-                // User messages have a non-ds-message first class; assistant start with ds-message.
+                // User messages include an additional hash-like wrapper class.
                 const classes = (el.className || '').split(/\s+/).filter(Boolean);
-                const isUser = classes[0] !== 'ds-message';
+                const hasHashClass = classes.some(c => /^d[0-9a-f]{7,}$/i.test(c));
+                const isUser = hasHashClass;
 
                 let content = text;
 
@@ -895,7 +886,6 @@ class DeepSeekSemantics:
         result, code = self.a11y.eval_js(js)
         if code == 0 and result:
             try:
-                import ast, json
                 # eval_js returns a JSON-string-as-string literal (double-quoted).
                 # Use ast.literal_eval to unescape the outer string, then json.loads.
                 clean = ast.literal_eval(result.strip())
@@ -911,9 +901,7 @@ class DeepSeekSemantics:
     def _parse_messages_fallback(self, snapshot: str) -> list[Message]:
         """Fallback message parser using a11y tree heuristics."""
         lines = snapshot.split("\n")
-        messages = []
-        buffer = []
-        last_was_user = False
+        raw_entries: list[str] = []
 
         # Find boundaries: sidebar ends at "开启新对话", input area starts at textbox
         sidebar_end = 0
@@ -949,33 +937,17 @@ class DeepSeekSemantics:
 
             # Skip thinking indicator
             if self.THINKING_INDICATOR in text and "用时" in text:
-                if buffer and last_was_user:
-                    messages.append(Message(role="user", content="".join(buffer)))
-                    buffer = []
-                last_was_user = False
                 continue
 
-            # Simple heuristic: very short numeric/text answers are assistant
-            # Questions ending in ? are user
-            is_user = text.endswith('?') or text.endswith('？')
+            if raw_entries and raw_entries[-1] == text:
+                continue
+            raw_entries.append(text)
 
-            if is_user and not last_was_user:
-                if buffer:
-                    messages.append(Message(role="assistant", content="".join(buffer)))
-                    buffer = []
-                last_was_user = True
-            elif not is_user and last_was_user:
-                if buffer:
-                    messages.append(Message(role="user", content="".join(buffer)))
-                    buffer = []
-                last_was_user = False
-
-            buffer.append(text)
-
-        if buffer:
-            role = "user" if last_was_user else "assistant"
-            messages.append(Message(role=role, content="".join(buffer)))
-
+        # Without reliable DOM metadata, use stable alternating roles.
+        messages: list[Message] = []
+        for idx, text in enumerate(raw_entries):
+            role = "user" if idx % 2 == 0 else "assistant"
+            messages.append(Message(role=role, content=text))
         return messages
 
     # --- Thinking trace ---
@@ -989,13 +961,12 @@ class DeepSeekSemantics:
         js = r"""
         (function() {
             const result = {exists: false, time: null, content: null};
-
-            // Find the last assistant message with thinking content
             const msgElements = document.querySelectorAll('.ds-message');
             let lastAssistantMsg = null;
             for (let i = msgElements.length - 1; i >= 0; i--) {
                 const classes = (msgElements[i].className || '').split(/\s+/).filter(Boolean);
-                if (classes[0] === 'ds-message') {
+                const hasHashClass = classes.some(c => /^d[0-9a-f]{7,}$/i.test(c));
+                if (classes.includes('ds-message') && !hasHashClass) {
                     lastAssistantMsg = msgElements[i];
                     break;
                 }
@@ -1031,7 +1002,6 @@ class DeepSeekSemantics:
         result, code = self.a11y.eval_js(js)
         if code == 0 and result:
             try:
-                import ast, json
                 clean = ast.literal_eval(result.strip())
                 data = json.loads(clean)
                 if data.get("exists") and data.get("content"):
