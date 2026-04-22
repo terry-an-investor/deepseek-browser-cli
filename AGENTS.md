@@ -14,8 +14,8 @@ This file is the implementation playbook for AI coding agents.
 1. Use Python 3.11+ and `uv` commands only (never bare `pip`).
 2. Add type hints for public APIs.
 3. Keep imports explicit; avoid wildcard/package-level shortcuts.
-4. Preserve backward compatibility in `deepseek_browser_cli/deepseek_model.py`.
-5. Avoid adding fallback paths unless clearly required by runtime variance.
+4. New public APIs belong in their semantic module (`primitives`, `semantics`, `chat`). Re-export through `deepseek_model.py` if external callers need it.
+5. Layer 2 actions rely on multiple fallback strategies (a11y tree → JS → broader search). Maintain this pattern for resilience against UI changes.
 
 ## Performance and Reliability Invariants
 
