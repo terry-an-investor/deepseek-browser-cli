@@ -415,24 +415,48 @@ class DeepSeekSemantics:
 
     def new_conversation(self) -> bool:
         """Start a new conversation by clicking the sidebar new-chat button."""
-        # Strategy 1: Click by the "开启新对话" text which is near the button
         snap = self.a11y.snapshot()
-        for line in snap.split("\n"):
-            if 'StaticText "开启新对话"' in line:
-                # The button is typically the sibling before this text
-                return self._try_click_new_chat_via_js()
+        lines = snap.split("\n")
+
+        # Strategy 1: click the actual a11y ref for the visible New chat affordance.
+        for idx, line in enumerate(lines):
+            if 'StaticText "开启新对话"' not in line and 'StaticText "New chat"' not in line:
+                continue
+            for prev in range(idx - 1, max(-1, idx - 4), -1):
+                ref_match = re.search(r"\[ref=([^\]]+)\]", lines[prev])
+                if ref_match and ("clickable" in lines[prev] or "button" in lines[prev]):
+                    return self.a11y.click_by_ref(ref_match.group(1))
+
         # Strategy 2: Direct JS
         return self._try_click_new_chat_via_js()
 
     def _try_click_new_chat_via_js(self) -> bool:
         js = """
         (function() {
-            // Find by aria-label or icon title
+            // Find by known labels first (Chinese + English).
             const btn = document.querySelector('button[aria-label="\\u5f00\\u542f\\u65b0\\u5bf9\\u8bdd"]')
+                || document.querySelector('button[aria-label="New chat"]')
                 || document.querySelector('[title="\\u5f00\\u542f\\u65b0\\u5bf9\\u8bdd"]')
+                || document.querySelector('[title="New chat"]')
                 || document.querySelector('div[aria-label="\\u5f00\\u542f\\u65b0\\u5bf9\\u8bdd"]')
+                || document.querySelector('div[aria-label="New chat"]')
                 || document.querySelector('[class*="new"] button');
             if (btn) { btn.click(); return 'clicked'; }
+
+            // Fallback: find a clickable element whose visible text is New chat.
+            const candidates = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
+            const textMatch = candidates.find(el => {
+                const text = (el.textContent || '').trim();
+                if (!text) return false;
+                if (!(text.includes('New chat') || text.includes('\\u5f00\\u542f\\u65b0\\u5bf9\\u8bdd'))) return false;
+                return typeof el.click === 'function';
+            });
+            if (textMatch) {
+                const clickable = textMatch.closest('button, [role="button"], a, [onclick], [tabindex]') || textMatch;
+                clickable.click();
+                return 'clicked-by-text';
+            }
+
             // Fallback: find the first icon-button in sidebar
             const sidebar = document.querySelector('nav, aside, [class*="sidebar"]');
             if (sidebar) {

@@ -131,3 +131,30 @@ def test_run_turn_returns_failure_when_no_fresh_response_arrives():
 
     assert result["success"] is False
     assert result["error"] == "Timeout waiting for response"
+
+
+def test_has_new_response_accepts_changed_last_response_on_virtualized_dom():
+    baseline = {
+        "message_count": 5,
+        "assistant_count": 3,
+        "last_response_content": "DEBUG_OK_2026",
+        "thinking_content": 'We need to answer with exactly "DEBUG_OK_2026".',
+        "thinking_time": None,
+    }
+    observation = {
+        "page_state": {"message_count": 5},
+        "messages": [
+            {"role": "assistant", "content": "older"},
+            {"role": "user", "content": "Please answer with exactly: LIVE_BRIDGE_OK"},
+            {"role": "assistant", "content": "LIVE_BRIDGE_OK"},
+        ],
+        "last_response": {
+            "content": "LIVE_BRIDGE_OK",
+            "thinking": {
+                "content": 'We need to answer exactly "LIVE_BRIDGE_OK" as per instruction.',
+                "time": None,
+            },
+        },
+    }
+
+    assert DeepSeekAgentBridge._has_new_response(baseline, observation) is True
