@@ -113,7 +113,9 @@ class DeepSeekChat:
     def wait_for_response(self, timeout: float = 60, poll_interval: float = 2.0) -> Optional[str]:
         """Wait for assistant response with state-aware polling."""
         deadline = time.time() + timeout
-        self._last_message_count = len(self.get_messages())
+        # Use the same metric for baseline and comparison to avoid divergence
+        # between get_messages() length and fast-state .ds-message count.
+        self._last_message_count = self.semantics.get_fast_state()["message_count"]
         last_streaming_check = False
 
         while time.time() < deadline:

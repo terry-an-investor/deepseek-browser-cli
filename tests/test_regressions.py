@@ -3,6 +3,7 @@
 
 from deepseek_browser_cli.agent_bridge import DeepSeekAgentBridge
 from deepseek_browser_cli.deepseek_model import (
+    DeepSeekChat,
     DeepSeekSemantics,
     Message,
     MultiRoundChat,
@@ -131,6 +132,53 @@ def test_run_turn_returns_failure_when_no_fresh_response_arrives():
 
     assert result["success"] is False
     assert result["error"] == "Timeout waiting for response"
+
+
+def test_wait_for_response_uses_consistent_counter_source():
+    """wait_for_response must not mix get_messages() length with fast-state count.
+
+    When the DOM has 2 .ds-message nodes but get_messages() only parses 1
+    (e.g., due to virtualization or filtering), using different sources for
+    baseline vs. comparison causes the new-reply check to never fire.
+    """
+    chat = object.__new__(DeepSeekChat)
+
+    class StubSemantics:
+        def __init__(self):
+            self._msg_count = 1
+
+        def get_fast_state(self):
+            return {"message_count": self._msg_count, "is_streaming": False}
+
+        def get_messages(self):
+            # Simulate divergence: fast_state sees 2 .ds-message nodes,
+            # but parsing only returns 1 message (the old one).
+            # The key point is that baseline + comparison both use fast_state
+            # count, so the new reply IS detected even though get_messages()
+            # has a different length.
+            if self._msg_count == 1:
+                return [Message(role="user", content="hello")]
+            return [
+                Message(role="user", content="hello"),
+                Message(role="assistant", content="new reply"),
+            ]
+
+    stub = StubSemantics()
+    chat.semantics = stub
+
+    # After baseline is captured (count=1), bump the DOM count to trigger detection
+    def delayed_bump():
+        import time
+        time.sleep(0.06)
+        stub._msg_count = 2
+
+    import threading
+    t = threading.Thread(target=delayed_bump)
+    t.start()
+
+    result = chat.wait_for_response(timeout=0.5, poll_interval=0.05)
+    t.join()
+    assert result == "new reply"
 
 
 def test_has_new_response_accepts_changed_last_response_on_virtualized_dom():
